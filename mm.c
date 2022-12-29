@@ -43,7 +43,7 @@
 #define WSIZE 4 /* Word size*/
 #define DSIZE 8 /* Double word size*/
 
-#define MAX(x, y) ((x) > (y)? (x) : (y))
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
 
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -58,32 +58,63 @@
 #define GET_PREVFREE(p) (GET(p) & 0x2)
 
 /* Given block ptr bp, compute address of its header and footer */
-#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define HDRP(bp) ((char *)(bp)-WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
-#define ROUND(size) ((size + ALIGNMENT - 1)  & -ALIGNMENT)
+#define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
 
-static char *heap_start; /* Address of the prologue footer */ 
-static char *last;       /* Points at epilogue header */ 
+static char *heap_start; /* Address of the prologue footer */
+static char *last;       /* Points at epilogue header */
+
+/*
+ * coalesce - Possibly coalesce adjecent blocks
+ */
+static void *coalesce(void *ptr) {
+
+  size_t prev_alloc = GET_ALLOC(ptr - DSIZE);
+  size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
+  size_t size = GET_SIZE(HDRP(ptr));
+
+  if (prev_alloc && next_alloc) { // previous and next blocks are allocated
+    return ptr;
+  } else if (prev_alloc && !next_alloc) { // next block is free
+    size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+  } else if (!prev_alloc && next_alloc) { // previous block is free
+    size += GET_SIZE(ptr - DSIZE);
+    PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+    ptr = PREV_BLKP(ptr);
+  } else { // both previous and next blocks are free
+    size += GET_SIZE(ptr - DSIZE);
+    size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+    PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
+    ptr = PREV_BLKP(ptr);
+  }
+
+  return ptr;
+}
 
 /*
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-  
-  if ((heap_start = mem_sbrk(4*WSIZE)) < 0) {
+
+  if ((heap_start = mem_sbrk(4 * WSIZE)) < 0) {
     return -1;
   }
 
-  PUT(heap_start, 0); /* Alignment padding */
-  PUT(heap_start + (1*WSIZE), PACK(DSIZE, 1)); /* Prologue header */
-  PUT(heap_start + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
-  PUT(heap_start + (3*WSIZE), PACK(0, 1));     /* Epilogue header */
-  heap_start += (2*WSIZE);
+  PUT(heap_start, 0);                            /* Alignment padding */
+  PUT(heap_start + (1 * WSIZE), PACK(DSIZE, 1)); /* Prologue header */
+  PUT(heap_start + (2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
+  PUT(heap_start + (3 * WSIZE), PACK(0, 1));     /* Epilogue header */
+  heap_start += (2 * WSIZE);
   last = heap_start + WSIZE;
 
   return 0;
@@ -94,38 +125,62 @@ int mm_init(void) {
  *      Always allocate a block whose size is a multiple of the alignment.
  */
 void *malloc(size_t size) {
-  
-  if(size + DSIZE < ALIGNMENT) {
+
+  if (size + DSIZE < ALIGNMENT) {
     size = ALIGNMENT;
   } else {
     size = ROUND(size + DSIZE);
   }
-  
+
   char *ptr = heap_start + DSIZE;
-  
-  while(ptr < last) {
-   
-   size_t ptr_size = GET_SIZE(HDRP(ptr)); 
-   if(!GET_ALLOC(HDRP(ptr)) && ptr_size >= size) { // the block is free and sufficient size
-      
-      if(ptr_size - size < ALIGNMENT) {
+
+  while (ptr < last) {
+
+    size_t ptr_size = GET_SIZE(HDRP(ptr));
+
+    if (GET_ALLOC(HDRP(ptr))) { // if block is not free skip
+      ptr += ptr_size;
+      continue;
+    }
+
+    if (ptr_size >= size) { // the block is sufficient size
+
+      if (ptr_size - size < ALIGNMENT) { // minimal size requirment
         PUT(HDRP(ptr), PACK(ptr_size, 1));
-        PUT(FTRP(ptr), PACK(ptr_size, 1));    
-      } else { // splitting
+        PUT(FTRP(ptr), PACK(ptr_size, 1));
+      } else {                         // splitting
         PUT(HDRP(ptr), PACK(size, 1)); // allocated block header
         PUT(FTRP(ptr), PACK(size, 1)); // allocated block footer
-        PUT(HDRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block header
-        PUT(FTRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block footer
+        PUT(HDRP(NEXT_BLKP(ptr)),
+            PACK(ptr_size - size, 0)); // free block header
+        PUT(FTRP(NEXT_BLKP(ptr)),
+            PACK(ptr_size - size, 0)); // free block footer
       }
 
       return ptr;
     }
-    
+
+    /* the block is not sufficient size but maybe coalescence is possible */
+    size_t new_block_size = GET_SIZE(HDRP(coalesce(ptr)));
+
+    while (new_block_size != ptr_size) {
+
+      if (new_block_size >=
+          size) { // newly coalescenced block has sufficient size
+        PUT(HDRP(ptr), PACK(new_block_size, 1));
+        PUT(FTRP(ptr), PACK(new_block_size, 1));
+        return ptr;
+      }
+
+      ptr_size = new_block_size;
+      new_block_size = GET_SIZE(HDRP(coalesce(ptr)));
+    }
+
     ptr += ptr_size;
   }
 
   char *new_block = mem_sbrk(size);
-  
+
   PUT(HDRP(new_block), PACK(size, 1));
   PUT(FTRP(new_block), PACK(size, 1));
   last = HDRP(NEXT_BLKP(new_block));
@@ -139,13 +194,13 @@ void *malloc(size_t size) {
  *      Computers have big memories; surely it won't be a problem.
  */
 void free(void *ptr) {
-  
-  if(ptr == NULL) {
+
+  if (ptr == NULL) {
     return;
   }
 
   size_t size = GET_SIZE(HDRP(ptr));
-  
+
   PUT(HDRP(ptr), PACK(size, 0));
   PUT(FTRP(ptr), PACK(size, 0));
 }
