@@ -101,17 +101,24 @@ void *malloc(size_t size) {
     size = ROUND(size + DSIZE);
   }
   
-  char *ptr = heap_start + WSIZE;
+  char *ptr = heap_start + DSIZE;
   
   while(ptr < last) {
    
-   size_t ptr_size = GET_SIZE(ptr); 
-    if(!GET_ALLOC(ptr) && ptr_size >= size) { // the block is free and sufficient size
-      PUT(ptr, PACK(ptr_size, 1));
-      PUT(ptr + ptr_size - WSIZE, PACK(ptr_size, 1));    
-      // if(ptr_size - size >= ALIGNMENT) {
-      // }
-      return ptr + WSIZE;
+   size_t ptr_size = GET_SIZE(HDRP(ptr)); 
+   if(!GET_ALLOC(HDRP(ptr)) && ptr_size >= size) { // the block is free and sufficient size
+      
+      if(ptr_size - size < ALIGNMENT) {
+        PUT(HDRP(ptr), PACK(ptr_size, 1));
+        PUT(FTRP(ptr), PACK(ptr_size, 1));    
+      } else { // splitting
+        PUT(HDRP(ptr), PACK(size, 1)); // allocated block header
+        PUT(FTRP(ptr), PACK(size, 1)); // allocated block footer
+        PUT(HDRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block header
+        PUT(FTRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block footer
+      }
+
+      return ptr;
     }
     
     ptr += ptr_size;
