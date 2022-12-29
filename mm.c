@@ -39,35 +39,52 @@
 #define calloc mm_calloc
 #endif /* def DRIVER */
 
-typedef struct {
-  int32_t header;
-  /*
-   * We don't know what the size of the payload will be, so we will
-   * declare it as a zero-length array.  This allow us to obtain a
-   * pointer to the start of the payload.
-   */
-  uint8_t payload[];
-} block_t;
+/* Basic constants and macros */
+#define WSIZE 4 /* Word size*/
+#define DSIZE 8 /* Double word size*/
 
-static size_t round_up(size_t size) {
-  return (size + ALIGNMENT - 1) & -ALIGNMENT;
-}
+#define MAX(x, y) ((x) > (y)? (x) : (y))
 
-static size_t get_size(block_t *block) {
-  return block->header & -2;
-}
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
 
-static void set_header(block_t *block, size_t size, bool is_allocated) {
-  block->header = size | is_allocated;
-}
+/* Read and write a word at address p */
+#define GET(p) (*(unsigned int *)(p))
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p) (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
+#define GET_PREVFREE(p) (GET(p) & 0x2)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+
+#define ROUND(size) ((size + ALIGNMENT - 1)  & -ALIGNMENT)
+
+static char *heap_start; /* Address of the prologue footer */ 
+static char *last;       /* Points at epilogue header */ 
 
 /*
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-  /* Pad heap start so first payload is at ALIGNMENT. */
-  if ((long)mem_sbrk(ALIGNMENT - offsetof(block_t, payload)) < 0)
+  
+  if ((heap_start = mem_sbrk(4*WSIZE)) < 0) {
     return -1;
+  }
+
+  PUT(heap_start, 0); /* Alignment padding */
+  PUT(heap_start + (1*WSIZE), PACK(DSIZE, 1)); /* Prologue header */
+  PUT(heap_start + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
+  PUT(heap_start + (3*WSIZE), PACK(0, 1));     /* Epilogue header */
+  heap_start += (2*WSIZE);
+  last = heap_start + WSIZE;
 
   return 0;
 }
@@ -77,13 +94,37 @@ int mm_init(void) {
  *      Always allocate a block whose size is a multiple of the alignment.
  */
 void *malloc(size_t size) {
-  size = round_up(sizeof(block_t) + size);
-  block_t *block = mem_sbrk(size);
-  if ((long)block < 0)
-    return NULL;
+  
+  if(size + DSIZE < ALIGNMENT) {
+    size = ALIGNMENT;
+  } else {
+    size = ROUND(size + DSIZE);
+  }
+  
+  char *ptr = heap_start + WSIZE;
+  
+  while(ptr < last) {
+   
+   size_t ptr_size = GET_SIZE(ptr); 
+    if(!GET_ALLOC(ptr) && ptr_size >= size) { // the block is free and sufficient size
+      PUT(ptr, PACK(ptr_size, 1));
+      PUT(ptr + ptr_size - WSIZE, PACK(ptr_size, 1));    
+      // if(ptr_size - size >= ALIGNMENT) {
+      // }
+      return ptr + WSIZE;
+    }
+    
+    ptr += ptr_size;
+  }
 
-  set_header(block, size, true);
-  return block->payload;
+  char *new_block = mem_sbrk(size);
+  
+  PUT(HDRP(new_block), PACK(size, 1));
+  PUT(FTRP(new_block), PACK(size, 1));
+  last = HDRP(NEXT_BLKP(new_block));
+  PUT(last, PACK(0, 1)); // new epilogue header
+
+  return new_block;
 }
 
 /*
@@ -91,12 +132,21 @@ void *malloc(size_t size) {
  *      Computers have big memories; surely it won't be a problem.
  */
 void free(void *ptr) {
+  
+  if(ptr == NULL) {
+    return;
+  }
+
+  size_t size = GET_SIZE(HDRP(ptr));
+  
+  PUT(HDRP(ptr), PACK(size, 0));
+  PUT(FTRP(ptr), PACK(size, 0));
 }
 
 /*
  * realloc - Change the size of the block by mallocing a new block,
  *      copying its data, and freeing the old block.
- **/
+ */
 void *realloc(void *old_ptr, size_t size) {
   /* If size == 0 then this is just free, and we return NULL. */
   if (size == 0) {
@@ -115,8 +165,7 @@ void *realloc(void *old_ptr, size_t size) {
     return NULL;
 
   /* Copy the old data. */
-  block_t *block = old_ptr - offsetof(block_t, payload);
-  size_t old_size = get_size(block);
+  size_t old_size = GET_SIZE(HDRP(old_ptr));
   if (size < old_size)
     old_size = size;
   memcpy(new_ptr, old_ptr, old_size);
