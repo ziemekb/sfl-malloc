@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -39,9 +40,11 @@
 #define calloc mm_calloc
 #endif /* def DRIVER */
 
+
 /* Basic constants and macros */
 #define WSIZE 4 /* Word size*/
 #define DSIZE 8 /* Double word size*/
+#define CHUNKSIZE (1<<12) /* Size of memory chunk*/
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -58,8 +61,12 @@
 #define GET_PREVFREE(p) (GET(p) & 0x2)
 
 /* Given block ptr bp, compute address of its header and footer */
-#define HDRP(bp) ((char *)(bp)-WSIZE)
+#define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, read pointers to next and previous free blocks in segregated free list */
+#define NEXT_FREE_BLKP(bp) (*(void **)(bp))
+#define PREV_FREE_BLKP(bp) (*((void **)((char *)(bp) + WSIZE)))
 
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
@@ -67,8 +74,85 @@
 
 #define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
 
+#define SINGULAR_BLOCKS_NUM 16 // 
+#define RANGED_BLOCKS_NUM 5 //
+#define LOWEST_LEADING_ZEROS 23 // __builtin_clz(256) = 23 in unsigned 32 bit 
+
 static char *heap_start; /* Address of the prologue footer */
 static char *last;       /* Points at epilogue header */
+
+/*
+ * segregated free lists in which free blocks ranging 
+ * in size from 16 to 256 bytes have its own list
+ */
+
+static void *segregated_list[SINGULAR_BLOCKS_NUM + RANGED_BLOCKS_NUM]; // = { NULL }; 
+
+static inline int find_index(size_t size) {
+
+  if(size <= SINGULAR_BLOCKS_NUM * ALIGNMENT) {
+    return size / 16 - 1; 
+  }
+
+  return __builtin_clz(size) - LOWEST_LEADING_ZEROS + SINGULAR_BLOCKS_NUM - 1;
+}
+
+static inline void *find_block(size_t size) {
+ 
+  int index = find_index(size); // smallest index that may fit the block
+  int range = SINGULAR_BLOCKS_NUM + RANGED_BLOCKS_NUM;
+
+  for(; index < range; ++index) {
+
+    void *new_block_ptr = segregated_list[index];
+
+    if(!new_block_ptr) {
+      continue;
+    }
+        
+    if(GET_SIZE(HDRP(new_block_ptr)) == size) {
+      // here i should get next free block of this size to be the first 
+      // or mark segregated_list[index] as NULL if none free are left
+      
+      segregated_list[index] = NEXT_FREE_BLKP(new_block_ptr);
+       
+      if(segregated_list[index]) {
+        PREV_FREE_BLKP(segregated_list[index]) = NULL;
+      }
+
+      return new_block_ptr;
+    }
+    
+    int min_diff = INT_MAX;
+    void *min_ptr = new_block_ptr;
+     
+    while(new_block_ptr) {
+      int diff = GET_SIZE(HDRP(new_block_ptr)) - size; // diff can be negative !!!
+      
+      if(diff < min_diff) {
+        min_diff = diff;
+        min_ptr = new_block_ptr;
+      }
+      new_block_ptr = NEXT_FREE_BLKP(new_block_ptr); 
+    }
+    void *prev_ptr = PREV_FREE_BLKP(min_ptr);
+    void *next_ptr = NEXT_FREE_BLKP(min_ptr);
+    
+    if(prev_ptr) {
+      NEXT_FREE_BLKP(prev_ptr) = next_ptr;
+    }
+    
+    if(next_ptr) {
+      PREV_FREE_BLKP(next_ptr) = prev_ptr;
+    }
+    
+    if(min_diff >= 0) {
+      return min_ptr;
+    }
+  }
+
+  return NULL;
+}
 
 /*
  * coalesce - Possibly coalesce adjecent blocks
