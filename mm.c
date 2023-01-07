@@ -70,7 +70,7 @@
 
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp)-DSIZE)))
 
 #define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
 
@@ -154,9 +154,45 @@ static inline void *find_block(size_t size) {
   return NULL;
 }
 
+static void add_to_list(void *ptr) {
+  
+  int index = find_index(GET_SIZE(HDRP(ptr)));
+
+  NEXT_FREE_BLKP(ptr) = segregated_list[index];
+  PREV_FREE_BLKP(ptr) = NULL;
+  PREV_FREE_BLKP(segregated_list[index]) = ptr;
+  segregated_list[index] = ptr;
+}
+
+/*
+ * split - Split given block if needed
+ */
+/*
+static void *split(void *ptr, size_t size) {
+  
+  size_t ptr_size = GET_SIZE(HDRP(ptr));
+
+  if (ptr_size - size < ALIGNMENT) { // minimal size requirment
+    return ptr;
+  } 
+  // splitting
+  PUT(HDRP(ptr), PACK(size, 0)); // allocated block header
+  PUT(FTRP(ptr), PACK(size, 0)); // allocated block footer
+  
+  // free block here
+  PUT(HDRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block header
+  PUT(FTRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block footer
+  // TO DO: ADD FREE BLOCK TO SEGREGATED FREE LIST 
+ 
+  return ptr;
+}
+*/
 /*
  * coalesce - Possibly coalesce adjecent blocks
+ * NOT UPDATED !!! SHOULD REMOVE FROM SEGREGATED FREE LIST IF COALESCED
+ * IF COALESCING SHALL BE EVEN DONE AT ALL
  */
+/*
 static void *coalesce(void *ptr) {
 
   size_t prev_alloc = GET_ALLOC(ptr - DSIZE);
@@ -184,12 +220,12 @@ static void *coalesce(void *ptr) {
 
   return ptr;
 }
-
+*/
 /*
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-
+  
   if ((heap_start = mem_sbrk(4 * WSIZE)) < 0) {
     return -1;
   }
@@ -216,8 +252,21 @@ void *malloc(size_t size) {
     size = ROUND(size + DSIZE);
   }
 
-  char *ptr = heap_start + DSIZE;
+  // size = (size + DSIZE < ALIGNMENT) ? ALIGNMENT : ROUND(size + DSIZE);
+  
+  void *free_block_ptr = find_block(size);
+  
+  if(free_block_ptr) { 
+  // split(free_block_ptr);
+  // marking the block as allocated
+    PUT(HDRP(free_block_ptr), PACK(GET_SIZE(HDRP(free_block_ptr)), 1));
+    PUT(FTRP(free_block_ptr), PACK(GET_SIZE(HDRP(free_block_ptr)), 1));
+    return free_block_ptr;
+  }
 
+  /*
+  char *ptr = heap_start + DSIZE; // first block ptr
+                                  
   while (ptr < last) {
 
     size_t ptr_size = GET_SIZE(HDRP(ptr));
@@ -244,7 +293,7 @@ void *malloc(size_t size) {
       return ptr;
     }
 
-    /* the block is not sufficient size but maybe coalescence is possible */
+    // the block is not sufficient size but maybe coalescence is possible 
     size_t new_block_size = GET_SIZE(HDRP(coalesce(ptr)));
 
     while (new_block_size != ptr_size) {
@@ -262,6 +311,7 @@ void *malloc(size_t size) {
 
     ptr += ptr_size;
   }
+  */
 
   char *new_block = mem_sbrk(size);
 
@@ -287,6 +337,9 @@ void free(void *ptr) {
 
   PUT(HDRP(ptr), PACK(size, 0));
   PUT(FTRP(ptr), PACK(size, 0));
+
+  // maybe coalescence here?
+  add_to_list(ptr); 
 }
 
 /*
