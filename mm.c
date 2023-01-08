@@ -175,28 +175,47 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * split - Split given block if needed
+ * add_to_sfl - Add block to segregated free list
  */
+static inline void add_to_sfl(void *ptr) {
+
+  assert(GET_ALLOC(HDRP(ptr)) == 0);
+
+  size_t size = GET_SIZE(HDRP(ptr));
+  int index = find_index(size);
+  void *new_block_ptr = ADD_VOIDP(sfl_start, index);
+
+  PUTP(ptr, GETP(new_block_ptr));
+  PUTP(new_block_ptr, ptr);
+}
+
 /*
-static void *split(void *ptr, size_t size) {
+ * split - Split given block if needed; returns size of the possibly split block
+ */
+
+static inline size_t split(void *ptr, size_t size) {
   
   size_t ptr_size = GET_SIZE(HDRP(ptr));
+  int diff = ptr_size - size;
 
-  if (ptr_size - size < ALIGNMENT) { // minimal size requirment
-    return ptr;
+  if (diff < ALIGNMENT) { // minimal size requirement
+    return ptr_size;
   } 
+
   // splitting
-  PUT(HDRP(ptr), PACK(size, 0)); // allocated block header
-  PUT(FTRP(ptr), PACK(size, 0)); // allocated block footer
+  PUT(HDRP(ptr), PACK(size, 0)); // soon to be allocated block header
+  PUT(FTRP(ptr), PACK(size, 0)); // soon to be allocated block footer
   
-  // free block here
-  PUT(HDRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block header
-  PUT(FTRP(NEXT_BLKP(ptr)), PACK(ptr_size - size, 0)); // free block footer
-  // TO DO: ADD FREE BLOCK TO SEGREGATED FREE LIST 
- 
-  return ptr;
+  // free block
+  void *next_block = NEXT_BLKP(ptr);
+  PUT(HDRP(next_block), PACK(diff, 0)); // free block header
+  PUT(FTRP(next_block), PACK(diff, 0)); // free block footer
+  
+  add_to_sfl(next_block);
+   
+  return size;
 }
-*/
+
 /*
  * coalesce - Possibly coalesce adjecent blocks
  * NOT UPDATED !!! SHOULD REMOVE FROM SEGREGATED FREE LIST IF COALESCED
@@ -285,10 +304,10 @@ void *malloc(size_t size) {
   void *free_block_ptr = find_block(size);
   
   if(free_block_ptr) { 
-  // split(free_block_ptr);
+    size_t new_size = split(free_block_ptr, size);
   // marking the block as allocated
-    PUT(HDRP(free_block_ptr), PACK(GET_SIZE(HDRP(free_block_ptr)), 1));
-    PUT(FTRP(free_block_ptr), PACK(GET_SIZE(HDRP(free_block_ptr)), 1));
+    PUT(HDRP(free_block_ptr), PACK(new_size, 1));
+    PUT(FTRP(free_block_ptr), PACK(new_size, 1));
     return free_block_ptr;
   }
   
@@ -318,14 +337,7 @@ void free(void *ptr) {
   PUT(FTRP(ptr), PACK(size, 0));
   
   // maybe coalescence here?
-  int index = find_index(size);
-  void *new_block_ptr = ADD_VOIDP(sfl_start, index);
-
-  // printf("pointer in the free block: %p\n", GETP(new_block_ptr));  
-  PUTP(ptr, GETP(new_block_ptr));
-  // printf("%p : %p\n", sfl_start, new_block_ptr);
-  
-  PUTP(new_block_ptr, ptr);
+  add_to_sfl(ptr);
 }
 
 /*
