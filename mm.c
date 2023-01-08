@@ -52,10 +52,14 @@
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
 
+/* calulate distance between two base pointers with one unit being equal to ALIGNMENT*/
+#define DISTANCE_BETWEEN(p1, p2) ((p1 && p2) ? (p1 - p2) / ALIGNMENT : 0)
 /* Read and write a word at address p */
 #define GET(p) (*(unsigned int *)(p))
+#define GETS(p) (*(int *)(p))
 #define GETP(p) (*(void **)(p)) // read pointer from double pointer
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
+#define PUTS(p, val) (*(int *)(p) = (val)) // write signed integer value
 #define PUTP(p, pval) (*(void **)(p) = (pval)) // write a pointer at address p
 
 /* Read the size and allocated fields from address p */
@@ -67,9 +71,9 @@
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* Given block ptr bp, read pointers to the next free block in segregated free list */
-#define NEXT_FREE_BLKP(bp) (*(void **)(bp))
+#define NEXT_FREE_BLKP(bp) (GETS(bp) ? (void *)((char *)(bp) + GETS(bp) * ALIGNMENT) : NULL)
 
-/* Add n * PSIZE bytes to void pointer since void pointer arthimetic is illegal */
+/* Add n * PSIZE bytes to void pointer since void pointer arthimetic is illegal and sizeof(void *) = PSIZE */
 #define ADD_VOIDP(p, n) ((void *)((char *)(p) + PSIZE * n))
 
 /* Given block ptr bp, compute address of next and previous blocks */
@@ -122,7 +126,6 @@ static inline void *find_block(size_t size) {
   if(new_block_ptr) {
     if(GET_SIZE(HDRP(new_block_ptr)) == size) {
         
-      // printf("found block instantly\n");
       PUTP(ADD_VOIDP(sfl_start, index), NEXT_FREE_BLKP(new_block_ptr)); 
       return new_block_ptr;
     }
@@ -137,10 +140,9 @@ static inline void *find_block(size_t size) {
     if(!new_block_ptr) { // if there is no blocks in the list continue
       continue;
     }
-    // printf("%d ", index);
     
     int min_diff = INT_MAX;    
-    void *min_ptr = new_block_ptr;
+    void *min_ptr = NULL;
     void *prev_ptr = NULL; // previous free block
     void *prev_min_ptr = NULL; // previous free block to the min_ptr
 
@@ -158,16 +160,18 @@ static inline void *find_block(size_t size) {
       new_block_ptr = NEXT_FREE_BLKP(new_block_ptr); 
     }
            
-    if(min_diff == INT_MAX) {
+    if(!min_ptr) {
       continue;
     }
 
-    if(prev_min_ptr) {
-      PUTP(prev_min_ptr, NEXT_FREE_BLKP(min_ptr));
+    //TO DO: update previous block "pointer" when field added
+
+    if(prev_min_ptr) { /* if prev_min_ptr is not null min_ptr wasn't the first element in the list */
+      PUTS(prev_min_ptr, DISTANCE_BETWEEN(NEXT_FREE_BLKP(min_ptr), prev_min_ptr)); 
+    } else { 
+      PUTP(ADD_VOIDP(sfl_start, index), NEXT_FREE_BLKP(min_ptr)); 
     }
 
-    // printf("found block later\n");
-    PUTP(ADD_VOIDP(sfl_start, index), NEXT_FREE_BLKP(min_ptr)); 
     return min_ptr;
   }
 
@@ -185,7 +189,9 @@ static inline void add_to_sfl(void *ptr) {
   int index = find_index(size);
   void *new_block_ptr = ADD_VOIDP(sfl_start, index);
 
-  PUTP(ptr, GETP(new_block_ptr));
+  assert((GETP(new_block_ptr) - ptr) % ALIGNMENT == 0);
+  PUTS(ptr, DISTANCE_BETWEEN(GETP(new_block_ptr), ptr));
+  // TO DO: add ptr as previous block of GETP(new_block_ptr)
   PUTP(new_block_ptr, ptr);
 }
 
