@@ -56,8 +56,8 @@
 #define DISTANCE_BETWEEN(p1, p2) ((p1 && p2) ? (p1 - p2) / ALIGNMENT : 0)
 /* Read and write a word at address p */
 #define GET(p) (*(unsigned int *)(p))
-#define GETS(p) (*(int *)(p))
-#define GETP(p) (*(void **)(p)) // read pointer from double pointer
+#define GETS(p) (*(int *)(p)) // read signed integer value
+#define GETP(p) (*(void **)(p)) // read pointer from adress p
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 #define PUTS(p, val) (*(int *)(p) = (val)) // write signed integer value
 #define PUTP(p, pval) (*(void **)(p) = (pval)) // write a pointer at address p
@@ -70,8 +70,12 @@
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
+/* Given block ptr bp, compute address of its previous free block field */
+#define PREV_FIELD(bp) ((char *)(bp) + WSIZE)
+
 /* Given block ptr bp, read pointers to the next free block in segregated free list */
 #define NEXT_FREE_BLKP(bp) (GETS(bp) ? (void *)((char *)(bp) + GETS(bp) * ALIGNMENT) : NULL)
+#define PREV_FREE_BLKP(bp) (GETS(PREV_FIELD(bp)) ? (void *)((char *)(bp) + GETS(PREV_FIELD(bp)) * ALIGNMENT) : NULL)
 
 /* Add n * PSIZE bytes to void pointer since void pointer arthimetic is illegal and sizeof(void *) = PSIZE */
 #define ADD_VOIDP(p, n) ((void *)((char *)(p) + PSIZE * n))
@@ -115,19 +119,39 @@ static inline int find_index(size_t size) {
   return LOWEST_LEADING_ZEROS - leading_zeros + SINGULAR_BLOCKS_NUM;
 }
 
+/*
+ * remove_from_sfl - Remove block from segregated free list
+ */
+static inline void remove_from_sfl(void *ptr, int index) {
+  
+  if(ptr == NULL) {
+    return;
+  }
+
+  void *next_free_blkp = NEXT_FREE_BLKP(ptr);
+  void *prev_free_blkp = PREV_FREE_BLKP(ptr);
+  int distance = DISTANCE_BETWEEN(next_free_blkp, prev_free_blkp);
+  
+  if(prev_free_blkp) {
+    PUTS(prev_free_blkp, distance);    
+  } else { // if ptr was the first block we assign the next block as the beginning of list
+    PUTP(ADD_VOIDP(sfl_start, index), next_free_blkp);
+  }
+  
+  if(next_free_blkp) {
+    PUTS(PREV_FIELD(next_free_blkp), -distance);
+  }
+}
+
 static inline void *find_block(size_t size) {
  
   int index = find_index(size); // smallest index that may fit the block
   void *new_block_ptr = GETP(ADD_VOIDP(sfl_start, index)); 
   
-  // printf("\nindex: %d", index);
-  // printf("\n%zu\n", size);
-
   if(new_block_ptr) {
-    if(GET_SIZE(HDRP(new_block_ptr)) == size) {
-        
-      PUTP(ADD_VOIDP(sfl_start, index), NEXT_FREE_BLKP(new_block_ptr)); 
-      return new_block_ptr;
+    if(GET_SIZE(HDRP(new_block_ptr)) == size) {    
+        remove_from_sfl(new_block_ptr, index);
+        return new_block_ptr;
     }
   } else {
     index++;
@@ -143,20 +167,15 @@ static inline void *find_block(size_t size) {
     
     int min_diff = INT_MAX;    
     void *min_ptr = NULL;
-    void *prev_ptr = NULL; // previous free block
-    void *prev_min_ptr = NULL; // previous free block to the min_ptr
 
     while(new_block_ptr) {
-      // printf("%p\n", new_block_ptr);
       int diff = GET_SIZE(HDRP(new_block_ptr)) - size; // diff can be negative !!!
       
       if(diff >= 0 && diff < min_diff) {
         min_diff = diff;
         min_ptr = new_block_ptr;
-        prev_min_ptr = prev_ptr;
       }
 
-      prev_ptr = new_block_ptr;
       new_block_ptr = NEXT_FREE_BLKP(new_block_ptr); 
     }
            
@@ -164,14 +183,7 @@ static inline void *find_block(size_t size) {
       continue;
     }
 
-    //TO DO: update previous block "pointer" when field added
-
-    if(prev_min_ptr) { /* if prev_min_ptr is not null min_ptr wasn't the first element in the list */
-      PUTS(prev_min_ptr, DISTANCE_BETWEEN(NEXT_FREE_BLKP(min_ptr), prev_min_ptr)); 
-    } else { 
-      PUTP(ADD_VOIDP(sfl_start, index), NEXT_FREE_BLKP(min_ptr)); 
-    }
-
+    remove_from_sfl(min_ptr, index);
     return min_ptr;
   }
 
@@ -187,12 +199,19 @@ static inline void add_to_sfl(void *ptr) {
 
   size_t size = GET_SIZE(HDRP(ptr));
   int index = find_index(size);
-  void *new_block_ptr = ADD_VOIDP(sfl_start, index);
+  void *first_blkp = ADD_VOIDP(sfl_start, index);
 
-  assert((GETP(new_block_ptr) - ptr) % ALIGNMENT == 0);
-  PUTS(ptr, DISTANCE_BETWEEN(GETP(new_block_ptr), ptr));
-  // TO DO: add ptr as previous block of GETP(new_block_ptr)
-  PUTP(new_block_ptr, ptr);
+  assert((GETP(first_blkp) - ptr) % ALIGNMENT == 0);
+  int distance = DISTANCE_BETWEEN(GETP(first_blkp), ptr);
+
+  PUTS(ptr, distance);
+  PUTS(PREV_FIELD(ptr), 0);
+  
+  /* if there is a block in the list assign the pointer ptr to its previous block field */
+  if(GETP(first_blkp)) {     
+    PUTS(PREV_FIELD(GETP(first_blkp)), -distance);
+  }
+  PUTP(first_blkp, ptr); // assign ptr as the new first block in list
 }
 
 /*
@@ -212,6 +231,7 @@ static inline size_t split(void *ptr, size_t size) {
   PUT(HDRP(ptr), PACK(size, 0)); // soon to be allocated block header
   PUT(FTRP(ptr), PACK(size, 0)); // soon to be allocated block footer
   
+  remove_from_sfl(ptr, find_index(ptr_size)); 
   // free block
   void *next_block = NEXT_BLKP(ptr);
   PUT(HDRP(next_block), PACK(diff, 0)); // free block header
@@ -397,8 +417,10 @@ void *calloc(size_t nmemb, size_t size) {
  * mm_checkheap - So simple, it doesn't need a checker!
  */
 void mm_checkheap(int verbose) {
-   
-  printf("checking...\n");
+  
+  static int check_num = -1;
+  check_num++; 
+  printf("----- checking ----- %d\n", check_num);
   for(int i = 0; i < SFL_SIZE; ++i) {
     
     void *ptr = GETP(ADD_VOIDP(sfl_start, i));
