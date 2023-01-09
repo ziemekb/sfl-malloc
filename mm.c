@@ -120,6 +120,30 @@ static inline int find_index(size_t size) {
 }
 
 /*
+ * add_to_sfl - Add block to segregated free list
+ */
+static inline void add_to_sfl(void *ptr) {
+
+  assert(GET_ALLOC(HDRP(ptr)) == 0);
+
+  size_t size = GET_SIZE(HDRP(ptr));
+  int index = find_index(size);
+  void *first_blkp = ADD_VOIDP(sfl_start, index);
+
+  assert((GETP(first_blkp) - ptr) % ALIGNMENT == 0);
+  int distance = DISTANCE_BETWEEN(GETP(first_blkp), ptr);
+
+  PUTS(ptr, distance);
+  PUTS(PREV_FIELD(ptr), 0);
+  
+  /* if there is a block in the list assign the pointer ptr to its previous block field */
+  if(GETP(first_blkp)) {     
+    PUTS(PREV_FIELD(GETP(first_blkp)), -distance);
+  }
+  PUTP(first_blkp, ptr); // assign ptr as the new first block in list
+}
+
+/*
  * remove_from_sfl - Remove block from segregated free list
  */
 static inline void remove_from_sfl(void *ptr, int index) {
@@ -191,30 +215,6 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * add_to_sfl - Add block to segregated free list
- */
-static inline void add_to_sfl(void *ptr) {
-
-  assert(GET_ALLOC(HDRP(ptr)) == 0);
-
-  size_t size = GET_SIZE(HDRP(ptr));
-  int index = find_index(size);
-  void *first_blkp = ADD_VOIDP(sfl_start, index);
-
-  assert((GETP(first_blkp) - ptr) % ALIGNMENT == 0);
-  int distance = DISTANCE_BETWEEN(GETP(first_blkp), ptr);
-
-  PUTS(ptr, distance);
-  PUTS(PREV_FIELD(ptr), 0);
-  
-  /* if there is a block in the list assign the pointer ptr to its previous block field */
-  if(GETP(first_blkp)) {     
-    PUTS(PREV_FIELD(GETP(first_blkp)), -distance);
-  }
-  PUTP(first_blkp, ptr); // assign ptr as the new first block in list
-}
-
-/*
  * split - Split given block if needed; returns size of the possibly split block
  */
 
@@ -244,38 +244,57 @@ static inline size_t split(void *ptr, size_t size) {
 
 /*
  * coalesce - Possibly coalesce adjecent blocks
- * NOT UPDATED !!! SHOULD REMOVE FROM SEGREGATED FREE LIST IF COALESCED
- * IF COALESCING SHALL BE EVEN DONE AT ALL
  */
-/*
+
 static void *coalesce(void *ptr) {
 
-  size_t prev_alloc = GET_ALLOC(ptr - DSIZE);
+  size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(ptr)));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
   size_t size = GET_SIZE(HDRP(ptr));
 
   if (prev_alloc && next_alloc) { // previous and next blocks are allocated
     return ptr;
   } else if (prev_alloc && !next_alloc) { // next block is free
-    size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    void *next_blkp = NEXT_BLKP(ptr);
+
+    remove_from_sfl(next_blkp, find_index(GET_SIZE(HDRP(next_blkp))));
+    
+    size += GET_SIZE(HDRP(next_blkp));
+ 
     PUT(HDRP(ptr), PACK(size, 0));
-    PUT(FTRP(ptr), PACK(size, 0));
+    PUT(FTRP(next_blkp), PACK(size, 0));
+
   } else if (!prev_alloc && next_alloc) { // previous block is free
-    size += GET_SIZE(ptr - DSIZE);
-    PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+    void *prev_blkp = PREV_BLKP(ptr);
+   
+    remove_from_sfl(prev_blkp, find_index(GET_SIZE(HDRP(prev_blkp))));
+
+    size += GET_SIZE(HDRP(prev_blkp));
+
+    PUT(HDRP(prev_blkp), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    ptr = PREV_BLKP(ptr);
+    
+    ptr = prev_blkp;
+  
   } else { // both previous and next blocks are free
-    size += GET_SIZE(ptr - DSIZE);
-    size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-    PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
-    PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
-    ptr = PREV_BLKP(ptr);
+    void *next_blkp = NEXT_BLKP(ptr); 
+    void *prev_blkp = PREV_BLKP(ptr);
+    
+    remove_from_sfl(prev_blkp, find_index(GET_SIZE(HDRP(prev_blkp))));
+    remove_from_sfl(next_blkp, find_index(GET_SIZE(HDRP(next_blkp))));
+ 
+    size += GET_SIZE(HDRP(prev_blkp));
+    size += GET_SIZE(HDRP(next_blkp));
+
+    PUT(HDRP(prev_blkp), PACK(size, 0));
+    PUT(FTRP(next_blkp), PACK(size, 0));
+   
+    ptr = prev_blkp;
   }
 
   return ptr;
 }
-*/
+
 /*
  * mm_init - Called when a new trace starts.
  */
@@ -362,7 +381,7 @@ void free(void *ptr) {
   PUT(HDRP(ptr), PACK(size, 0));
   PUT(FTRP(ptr), PACK(size, 0));
   
-  // maybe coalescence here?
+  ptr = coalesce(ptr);
   add_to_sfl(ptr);
 }
 
