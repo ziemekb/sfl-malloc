@@ -56,10 +56,12 @@
 /* calulate distance between two base pointers with one unit being equal to
  * ALIGNMENT*/
 #define DISTANCE_BETWEEN(p1, p2) ((p1 && p2) ? (p1 - p2) / ALIGNMENT : 0)
+
 /* Read and write a word at address p */
 #define GET(p) (*(unsigned int *)(p))
 #define GETS(p) (*(int *)(p))   // read signed integer value
 #define GETP(p) (*(void **)(p)) // read pointer from adress p
+
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 #define PUTS(p, val) (*(int *)(p) = (val))     // write signed integer value
 #define PUTP(p, pval) (*(void **)(p) = (pval)) // write a pointer at address p
@@ -70,7 +72,7 @@
 #define GET_PFREE(p) (GET(p) & 0x2)
 
 /* Given block ptr bp, compute address of its header and footer */
-#define HDRP(bp) ((char *)(bp)-WSIZE)
+#define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* Given block ptr bp, compute address of its previous free block field */
@@ -90,8 +92,8 @@
 #define ADD_VOIDP(p, n) ((void *)((char *)(p) + PSIZE * n))
 
 /* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) // only to be used when it is known that previous block is free
 
 #define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
 
@@ -110,8 +112,8 @@
 
 static char *heap_start;    /* Address of the prologue footer */
 static char *epilogue_blkp; /* Points at epilogue header */
-// static char *last_blkp; /* Pointer to last block */
 static void *sfl_start; /* Adress of first list in segregated free lists*/
+static int allocated = 0;
 
 /*
  * segregated free lists in which free blocks ranging
@@ -244,20 +246,26 @@ static inline void *find_block(size_t size) {
 
 static inline size_t split(void *ptr, size_t size) {
 
+  assert(GET_ALLOC(HDRP(ptr)) == 0);
+
   size_t ptr_size = GET_SIZE(HDRP(ptr));
   int diff = ptr_size - size;
 
   if (diff < ALIGNMENT) { // minimal size requirement
     return ptr_size;
   }
-
+  
+  size_t pfree = GET_PFREE(HDRP(ptr));
   // splitting
   PUT(HDRP(ptr),
-      PACK(size, 0, GET_PFREE(HDRP(ptr)))); // soon to be allocated block header
+      PACK(size, 0, pfree)); // soon to be allocated block header
   PUT(FTRP(ptr),
-      PACK(size, 0, GET_PFREE(HDRP(ptr)))); // soon to be allocated block footer
+      PACK(size, 0, pfree)); // soon to be allocated block footer
 
-  // could only change pointer if size class is the same
+  /* 
+   * could allocate the latter block so when the free block 
+   * stays in the same size class nothing has to be done
+   */
   remove_from_sfl(ptr, find_index(ptr_size));
   // free block
   void *next_block = NEXT_BLKP(ptr);
@@ -275,7 +283,7 @@ static inline size_t split(void *ptr, size_t size) {
 
 static void *coalesce(void *ptr) {
 
-  size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(ptr)));
+  size_t prev_alloc = !GET_PFREE(HDRP(ptr));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
   size_t size = GET_SIZE(HDRP(ptr));
 
@@ -284,37 +292,50 @@ static void *coalesce(void *ptr) {
   } else if (prev_alloc && !next_alloc) { // next block is free
     void *next_blkp = NEXT_BLKP(ptr);
 
-    remove_from_sfl(next_blkp, find_index(GET_SIZE(HDRP(next_blkp))));
+    size_t next_size = GET_SIZE(HDRP(next_blkp));
 
-    size += GET_SIZE(HDRP(next_blkp));
+    remove_from_sfl(next_blkp, find_index(next_size));
 
-    PUT(HDRP(ptr), PACK(size, 0, GET_PFREE(HDRP(ptr))));
-    PUT(FTRP(next_blkp), PACK(size, 0, GET_PFREE(HDRP(ptr))));
+    size += next_size;
+
+    size_t pfree = GET_PFREE(HDRP(ptr));
+
+    PUT(HDRP(ptr), PACK(size, 0, pfree));
+    PUT(FTRP(next_blkp), PACK(size, 0, pfree));
 
   } else if (!prev_alloc && next_alloc) { // previous block is free
     void *prev_blkp = PREV_BLKP(ptr);
 
-    remove_from_sfl(prev_blkp, find_index(GET_SIZE(HDRP(prev_blkp))));
+    size_t prev_size = GET_SIZE(HDRP(prev_blkp));
 
-    size += GET_SIZE(HDRP(prev_blkp));
+    remove_from_sfl(prev_blkp, find_index(prev_size));
 
-    PUT(HDRP(prev_blkp), PACK(size, 0, GET_PFREE(HDRP(prev_blkp))));
-    PUT(FTRP(ptr), PACK(size, 0, GET_PFREE(HDRP(prev_blkp))));
+    size += prev_size;
+
+    size_t pfree = GET_PFREE(HDRP(prev_blkp));
+
+    PUT(HDRP(prev_blkp), PACK(size, 0, pfree));
+    PUT(FTRP(ptr), PACK(size, 0, pfree));
 
     ptr = prev_blkp;
 
   } else { // both previous and next blocks are free
     void *next_blkp = NEXT_BLKP(ptr);
     void *prev_blkp = PREV_BLKP(ptr);
+    
+    size_t next_size = GET_SIZE(HDRP(next_blkp));
+    size_t prev_size = GET_SIZE(HDRP(prev_blkp));
 
-    remove_from_sfl(prev_blkp, find_index(GET_SIZE(HDRP(prev_blkp))));
-    remove_from_sfl(next_blkp, find_index(GET_SIZE(HDRP(next_blkp))));
+    remove_from_sfl(prev_blkp, find_index(prev_size));
+    remove_from_sfl(next_blkp, find_index(next_size));
 
-    size += GET_SIZE(HDRP(prev_blkp));
-    size += GET_SIZE(HDRP(next_blkp));
+    size += prev_size;
+    size += next_size;
 
-    PUT(HDRP(prev_blkp), PACK(size, 0, GET_PFREE(HDRP(prev_blkp))));
-    PUT(FTRP(next_blkp), PACK(size, 0, GET_PFREE(HDRP(prev_blkp))));
+    size_t pfree = GET_PFREE(HDRP(prev_blkp));
+
+    PUT(HDRP(prev_blkp), PACK(size, 0, pfree));
+    PUT(FTRP(next_blkp), PACK(size, 0, pfree));
 
     ptr = prev_blkp;
   }
@@ -350,8 +371,8 @@ int mm_init(void) {
   // TO DO: if SFL_SIZE changes alignment padding is adequately changed too
   PUT(heap_start, 0);
 
-  PUT(heap_start + (1 * WSIZE), PACK(DSIZE, 1, 0)); /* Prologue header */
-  PUT(heap_start + (2 * WSIZE), PACK(DSIZE, 1, 0)); /* Prologue footer */
+  PUT(heap_start + (1 * WSIZE), PACK(WSIZE, 1, 0)); /* Prologue header */
+  PUT(heap_start + (2 * WSIZE), PACK(WSIZE, 1, 0)); /* Prologue footer */
   PUT(heap_start + (3 * WSIZE), PACK(0, 1, 0));     /* Epilogue header */
   heap_start += (2 * WSIZE);
   epilogue_blkp = heap_start + WSIZE;
@@ -365,10 +386,10 @@ int mm_init(void) {
  */
 void *malloc(size_t size) {
 
-  if (size + DSIZE < ALIGNMENT) {
+  if (size + WSIZE < ALIGNMENT) {
     size = ALIGNMENT;
   } else {
-    size = ROUND(size + DSIZE);
+    size = ROUND(size + WSIZE);
   }
 
   // size = (size + DSIZE < ALIGNMENT) ? ALIGNMENT : ROUND(size + DSIZE);
@@ -378,20 +399,25 @@ void *malloc(size_t size) {
   if (free_blkp) {
     size_t new_size = split(free_blkp, size);
     // marking the block as allocated
+    
     PUT(HDRP(free_blkp), PACK(new_size, 1, GET_PFREE(HDRP(free_blkp))));
-    PUT(FTRP(free_blkp), PACK(new_size, 1, GET_PFREE(FTRP(free_blkp))));
+    
+    /* if free_blkp is the last block update PFREE in epilogue header */
+    void *next_blkh = HDRP(NEXT_BLKP(free_blkp));
+    PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0));
+    
     return free_blkp;
   }
 
   free_blkp = mem_sbrk(size);
 
-  // TO DO : Check if previous block is free via GET_ALLOC(HDRP(last_blkp))
+  size_t pfree = GET_PFREE(epilogue_blkp);
+  PUT(HDRP(free_blkp), PACK(size, 1, pfree));
 
-  PUT(HDRP(free_blkp), PACK(size, 1, 0));
-  PUT(FTRP(free_blkp), PACK(size, 1, 0));
-  epilogue_blkp = HDRP(NEXT_BLKP(free_blkp));
+  epilogue_blkp = HDRP(NEXT_BLKP(free_blkp));   
   PUT(epilogue_blkp, PACK(0, 1, 0)); // new epilogue header
 
+  allocated++;
   return free_blkp;
 }
 
@@ -405,13 +431,21 @@ void free(void *ptr) {
   if (ptr == NULL) {
     return;
   }
-  size_t size = GET_SIZE(HDRP(ptr));
 
-  PUT(HDRP(ptr), PACK(size, 0, GET_PFREE(HDRP(ptr))));
-  PUT(FTRP(ptr), PACK(size, 0, GET_PFREE(HDRP(ptr))));
+  size_t size = GET_SIZE(HDRP(ptr));
+  size_t pfree = GET_PFREE(HDRP(ptr));
+
+  PUT(HDRP(ptr), PACK(size, 0, pfree));
+  PUT(FTRP(ptr), PACK(size, 0, pfree));
+
+  /* switching previous free bit in the next block*/
+  
+  void *next_blkh = HDRP(NEXT_BLKP(ptr));
+  PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0x2));  
 
   ptr = coalesce(ptr);
   add_to_sfl(ptr);
+  allocated--;
 }
 
 /*
@@ -466,18 +500,39 @@ void *calloc(size_t nmemb, size_t size) {
  */
 void mm_checkheap(int verbose) {
 
-  static int check_num = -1;
+  static int check_num = 0;
   check_num++;
-  printf("----- checking ----- %d\n", check_num);
-  for (int i = 0; i < SFL_SIZE; ++i) {
+  printf("----- checking ----- %d === %d\n", check_num, allocated);
+  
+  char* blk_check = heap_start + DSIZE;
+  int blk_num = 0;
 
-    void *ptr = GETP(ADD_VOIDP(sfl_start, i));
+  if(verbose > 0) {
+    printf("Heap start offset: %p\n", heap_start + WSIZE);
 
-    while (ptr) {
-      printf("address: %p\n", ptr);
-      printf("size: %d\n", GET_SIZE(HDRP(ptr)));
+    while(blk_check < epilogue_blkp) {
+      
+      printf("block number: %d size: %u ", blk_num, GET_SIZE(HDRP(blk_check)));
+      printf("address: %p alloc: %d pfree: %d\n", blk_check, GET_ALLOC(blk_check), GET_PFREE(blk_check));
+      blk_num++;
+      blk_check = NEXT_BLKP(blk_check);
+    }
 
-      ptr = NEXT_FREE_BLKP(ptr);
+    printf("Epilogue header: %p alloc: %d pfree: %d\n", epilogue_blkp, GET_ALLOC(epilogue_blkp), GET_PFREE(epilogue_blkp));
+  }
+
+  if(verbose > 1) { // checking the segregated fit lists
+
+    for (int i = 0; i < SFL_SIZE; ++i) {
+
+      void *ptr = GETP(ADD_VOIDP(sfl_start, i));
+
+      while (ptr) {
+        printf("address: %p\n", ptr);
+        printf("size: %d\n", GET_SIZE(HDRP(ptr)));
+
+        ptr = NEXT_FREE_BLKP(ptr);
+      }
     }
   }
 }
