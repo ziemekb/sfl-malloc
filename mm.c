@@ -276,21 +276,14 @@ static inline void *split(void *ptr, size_t size) {
   return next_blkp;
 }
 
-/*
- * coalesce - Possibly coalesce adjecent blocks
- */
+static void *coalesce_front(void *ptr) {
 
-static void *coalesce(void *ptr) {
-
-  size_t prev_alloc = !GET_PFREE(HDRP(ptr));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
   size_t size = GET_SIZE(HDRP(ptr));
 
-  if (prev_alloc && next_alloc) { // previous and next blocks are allocated
-    return ptr;
-  } else if (prev_alloc && !next_alloc) { // next block is free
+  if (!next_alloc) { // next block is free
+    
     void *next_blkp = NEXT_BLKP(ptr);
-
     size_t next_size = GET_SIZE(HDRP(next_blkp));
 
     remove_from_sfl(next_blkp, find_index(next_size));
@@ -301,10 +294,19 @@ static void *coalesce(void *ptr) {
 
     PUT(HDRP(ptr), PACK(size, 0, pfree));
     PUT(FTRP(next_blkp), PACK(size, 0, pfree));
+  }
 
-  } else if (!prev_alloc && next_alloc) { // previous block is free
+  return ptr;
+} 
+
+static void *coalesce_back(void *ptr) {
+  
+  size_t prev_alloc = !GET_PFREE(HDRP(ptr));
+  size_t size = GET_SIZE(HDRP(ptr));
+
+  if(!prev_alloc) {
+
     void *prev_blkp = PREV_BLKP(ptr);
-
     size_t prev_size = GET_SIZE(HDRP(prev_blkp));
 
     remove_from_sfl(prev_blkp, find_index(prev_size));
@@ -315,28 +317,8 @@ static void *coalesce(void *ptr) {
 
     PUT(HDRP(prev_blkp), PACK(size, 0, pfree));
     PUT(FTRP(ptr), PACK(size, 0, pfree));
-
-    ptr = prev_blkp;
-
-  } else { // both previous and next blocks are free
-    void *next_blkp = NEXT_BLKP(ptr);
-    void *prev_blkp = PREV_BLKP(ptr);
-
-    size_t next_size = GET_SIZE(HDRP(next_blkp));
-    size_t prev_size = GET_SIZE(HDRP(prev_blkp));
-
-    remove_from_sfl(prev_blkp, find_index(prev_size));
-    remove_from_sfl(next_blkp, find_index(next_size));
-
-    size += prev_size;
-    size += next_size;
-
-    size_t pfree = GET_PFREE(HDRP(prev_blkp));
-
-    PUT(HDRP(prev_blkp), PACK(size, 0, pfree));
-    PUT(FTRP(next_blkp), PACK(size, 0, pfree));
-
-    ptr = prev_blkp;
+    
+    return prev_blkp;
   }
 
   return ptr;
@@ -456,7 +438,8 @@ void free(void *ptr) {
   void *next_blkh = HDRP(NEXT_BLKP(ptr));
   PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 2));
 
-  ptr = coalesce(ptr);
+  coalesce_front(ptr);
+  ptr = coalesce_back(ptr);
   add_to_sfl(ptr);
   allocated--;
 }
@@ -475,7 +458,9 @@ void *realloc(void *old_ptr, size_t size) {
   /* If old_ptr is NULL, then this is just malloc. */
   if (!old_ptr)
     return malloc(size);
-  
+ 
+  size_t old_size = GET_SIZE(HDRP(old_ptr));
+
   void *new_ptr = malloc(size);
 
   /* If malloc() fails, the original block is left untouched. */
@@ -483,7 +468,6 @@ void *realloc(void *old_ptr, size_t size) {
     return NULL;
 
   /* Copy the old data. */
-  size_t old_size = GET_SIZE(HDRP(old_ptr));
   if (size < old_size)
     old_size = size;
   memcpy(new_ptr, old_ptr, old_size);
