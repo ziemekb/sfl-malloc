@@ -41,17 +41,15 @@
 #endif /* def DRIVER */
 
 /* Basic constants and macros */
-#define WSIZE 4             /* Word size*/
-#define DSIZE 8             /* Double word size*/
-#define PSIZE 8             /* Size of pointer in bytes */
-#define CHUNKSIZE (1 << 12) /* Size of memory chunk*/
+#define WSIZE 4              /* Word size*/
+#define DSIZE 8              /* Double word size*/
+#define PSIZE 8              /* Size of pointer in bytes */
+#define CHUNK_SIZE (1 << 12) /* Size of memory chunk*/
 
 #define PFREE 0x2
 
 /* Pack size, allocated bit and previous free bit into a word */
 #define PACK(size, alloc, pfree) ((size) | (alloc) | (pfree))
-/* Pack a size and allocated bit into a word */
-#define PACK_A(size, alloc) ((size) | (alloc))
 
 /* calulate distance between two base pointers with one unit being equal to
  * ALIGNMENT*/
@@ -72,7 +70,7 @@
 #define GET_PFREE(p) (GET(p) & 0x2)
 
 /* Given block ptr bp, compute address of its header and footer */
-#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define HDRP(bp) ((char *)(bp)-WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
 /* Given block ptr bp, compute address of its previous free block field */
@@ -92,10 +90,14 @@
 #define ADD_VOIDP(p, n) ((void *)((char *)(p) + PSIZE * n))
 
 /* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) // only to be used when it is known that previous block is free
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
+#define PREV_BLKP(bp)                                                          \
+  ((char *)(bp)-GET_SIZE(                                                      \
+    ((char *)(bp)-DSIZE))) // only to be used when it is known that previous
+                           // block is free
 
 #define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
+#define ROUND_MEM(size) ((size + CHUNK_SIZE - 1) & -CHUNK_SIZE)
 
 #define SINGULAR_BLOCKS_NUM                                                    \
   16 // Number of free lists with blocks of its own sizes
@@ -112,7 +114,7 @@
 
 static char *heap_start;    /* Address of the prologue footer */
 static char *epilogue_blkp; /* Points at epilogue header */
-static void *sfl_start; /* Adress of first list in segregated free lists*/
+static void *sfl_start;     /* Adress of first list in segregated free lists*/
 static int allocated = 0;
 
 /*
@@ -122,7 +124,6 @@ static int allocated = 0;
  */
 
 /* TO DO:
- * Footer only in free blocks
  * Realloc optimization
  * Chunks
  * Maybe better splitting
@@ -199,7 +200,6 @@ static inline void *find_block(size_t size) {
 
   if (new_block_ptr) {
     if (GET_SIZE(HDRP(new_block_ptr)) == size) {
-      remove_from_sfl(new_block_ptr, index);
       return new_block_ptr;
     }
   } else {
@@ -233,7 +233,6 @@ static inline void *find_block(size_t size) {
       continue;
     }
 
-    remove_from_sfl(min_ptr, index);
     return min_ptr;
   }
 
@@ -254,25 +253,23 @@ static inline size_t split(void *ptr, size_t size) {
   if (diff < ALIGNMENT) { // minimal size requirement
     return ptr_size;
   }
-  
+
   size_t pfree = GET_PFREE(HDRP(ptr));
   // splitting
-  PUT(HDRP(ptr),
-      PACK(size, 0, pfree)); // soon to be allocated block header
-  PUT(FTRP(ptr),
-      PACK(size, 0, pfree)); // soon to be allocated block footer
+  PUT(HDRP(ptr), PACK(size, 0, pfree)); // soon to be allocated block header
+  PUT(FTRP(ptr), PACK(size, 0, pfree)); // soon to be allocated block footer
 
-  /* 
-   * could allocate the latter block so when the free block 
-   * stays in the same size class nothing has to be done
+  /*
+   * could allocate the latter block so when the free block
+   * stays in the same size class sfl doesn't have to be altered
    */
-  remove_from_sfl(ptr, find_index(ptr_size));
+  // remove_from_sfl(ptr, find_index(ptr_size));
   // free block
-  void *next_block = NEXT_BLKP(ptr);
-  PUT(HDRP(next_block), PACK(diff, 0, 0)); // free block header
-  PUT(FTRP(next_block), PACK(diff, 0, 0)); // free block footer
+  void *next_blkp = NEXT_BLKP(ptr);
+  PUT(HDRP(next_blkp), PACK(diff, 0, 0)); // free block header
+  PUT(FTRP(next_blkp), PACK(diff, 0, 0)); // free block footer
 
-  add_to_sfl(next_block);
+  add_to_sfl(next_blkp);
 
   return size;
 }
@@ -322,7 +319,7 @@ static void *coalesce(void *ptr) {
   } else { // both previous and next blocks are free
     void *next_blkp = NEXT_BLKP(ptr);
     void *prev_blkp = PREV_BLKP(ptr);
-    
+
     size_t next_size = GET_SIZE(HDRP(next_blkp));
     size_t prev_size = GET_SIZE(HDRP(prev_blkp));
 
@@ -376,6 +373,7 @@ int mm_init(void) {
   PUT(heap_start + (3 * WSIZE), PACK(0, 1, 0));     /* Epilogue header */
   heap_start += (2 * WSIZE);
   epilogue_blkp = heap_start + WSIZE;
+  PUT(epilogue_blkp, PACK(0, 1, 0));
 
   return 0;
 }
@@ -386,36 +384,41 @@ int mm_init(void) {
  */
 void *malloc(size_t size) {
 
-  if (size + WSIZE < ALIGNMENT) {
-    size = ALIGNMENT;
-  } else {
-    size = ROUND(size + WSIZE);
-  }
-
-  // size = (size + DSIZE < ALIGNMENT) ? ALIGNMENT : ROUND(size + DSIZE);
+  size = (size + WSIZE < ALIGNMENT) ? ALIGNMENT : ROUND(size + WSIZE);
 
   void *free_blkp = find_block(size);
 
   if (free_blkp) {
+    size_t old_size = GET_SIZE(HDRP(free_blkp));
     size_t new_size = split(free_blkp, size);
+
+    remove_from_sfl(free_blkp, find_index(old_size));
+
     // marking the block as allocated
-    
     PUT(HDRP(free_blkp), PACK(new_size, 1, GET_PFREE(HDRP(free_blkp))));
-    
-    /* if free_blkp is the last block update PFREE in epilogue header */
+
     void *next_blkh = HDRP(NEXT_BLKP(free_blkp));
     PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0));
-    
+    allocated++;
     return free_blkp;
   }
 
-  free_blkp = mem_sbrk(size);
+  size_t mem_incr = ROUND_MEM(size);
+  free_blkp = mem_sbrk(mem_incr);
 
   size_t pfree = GET_PFREE(epilogue_blkp);
+
+  PUT(HDRP(free_blkp), PACK(mem_incr, 0, pfree));
+
+  size_t new_size = split(free_blkp, size);
   PUT(HDRP(free_blkp), PACK(size, 1, pfree));
 
-  epilogue_blkp = HDRP(NEXT_BLKP(free_blkp));   
-  PUT(epilogue_blkp, PACK(0, 1, 0)); // new epilogue header
+  epilogue_blkp += mem_incr; // HDRP(NEXT_BLKP(free_blkp));
+
+  /* if block was not split previous block of epilogue header is allocated
+   * otherwise its free */
+  PUT(epilogue_blkp,
+      PACK(0, 1, new_size == mem_incr ? 0 : 2)); // new epilogue header
 
   allocated++;
   return free_blkp;
@@ -439,9 +442,9 @@ void free(void *ptr) {
   PUT(FTRP(ptr), PACK(size, 0, pfree));
 
   /* switching previous free bit in the next block*/
-  
+
   void *next_blkh = HDRP(NEXT_BLKP(ptr));
-  PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0x2));  
+  PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 2));
 
   ptr = coalesce(ptr);
   add_to_sfl(ptr);
@@ -503,25 +506,29 @@ void mm_checkheap(int verbose) {
   static int check_num = 0;
   check_num++;
   printf("----- checking ----- %d === %d\n", check_num, allocated);
-  
-  char* blk_check = heap_start + DSIZE;
+
+  char *blk_check = heap_start + DSIZE;
   int blk_num = 0;
 
-  if(verbose > 0) {
+  if (verbose > 0) {
     printf("Heap start offset: %p\n", heap_start + WSIZE);
 
-    while(blk_check < epilogue_blkp) {
-      
+    while (blk_check < epilogue_blkp) {
+
       printf("block number: %d size: %u ", blk_num, GET_SIZE(HDRP(blk_check)));
-      printf("address: %p alloc: %d pfree: %d\n", blk_check, GET_ALLOC(blk_check), GET_PFREE(blk_check));
+      printf("address: %p alloc: %d pfree: %d\n", blk_check,
+             GET_ALLOC(HDRP(blk_check)), GET_PFREE(HDRP(blk_check)));
       blk_num++;
       blk_check = NEXT_BLKP(blk_check);
     }
 
-    printf("Epilogue header: %p alloc: %d pfree: %d\n", epilogue_blkp, GET_ALLOC(epilogue_blkp), GET_PFREE(epilogue_blkp));
+    printf("Epilogue header: %p alloc: %d pfree: %d\n", epilogue_blkp,
+           GET_ALLOC(epilogue_blkp), GET_PFREE(epilogue_blkp));
   }
 
-  if(verbose > 1) { // checking the segregated fit lists
+  if (verbose > 1) { // checking the segregated fit lists
+
+    printf("--- Segregated free lists ---\n");
 
     for (int i = 0; i < SFL_SIZE; ++i) {
 
