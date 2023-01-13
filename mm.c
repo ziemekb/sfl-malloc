@@ -125,7 +125,6 @@ static int allocated = 0;
 
 /* TO DO:
  * Realloc optimization
- * Chunks
  * Maybe better splitting
  * Maybe increase number of singular and ranged block lists
  */
@@ -255,6 +254,8 @@ static inline void *split(void *ptr, size_t size) {
 
   if (diff < ALIGNMENT) { // minimal size requirement
     return ptr;
+  } else if (size == 0) {
+    return ptr;
   }
 
   size_t pfree = GET_PFREE(HDRP(ptr));
@@ -373,6 +374,7 @@ void *malloc(size_t size) {
   void *free_blkp = find_block(size);
 
   if (free_blkp) {
+    
     size_t old_size = GET_SIZE(HDRP(free_blkp));
     void *split_blkp = split(free_blkp, size);
     int old_size_index = find_index(old_size);
@@ -460,6 +462,42 @@ void *realloc(void *old_ptr, size_t size) {
     return malloc(size);
  
   size_t old_size = GET_SIZE(HDRP(old_ptr));
+  
+  if(old_size - WSIZE >= size) {
+    return old_ptr;
+  }
+
+  void *next_blkp = NEXT_BLKP(old_ptr);
+  size_t next_blk_size = GET_SIZE(HDRP(next_blkp));
+  size_t r_size = ROUND(size + WSIZE);
+
+  if(!GET_ALLOC(HDRP(next_blkp)) && 
+      next_blk_size + old_size >= r_size) {
+    
+    remove_from_sfl(next_blkp, find_index(next_blk_size));
+    void *split_blkp = split(next_blkp, next_blk_size + old_size - r_size);
+    
+    if(split_blkp != next_blkp) {
+      add_to_sfl(split_blkp);
+      PUT(HDRP(split_blkp), PACK(GET_SIZE(HDRP(split_blkp)), 0, 0));
+      PUT(FTRP(split_blkp), PACK(GET_SIZE(HDRP(split_blkp)), 0, 0));
+    } else {
+      next_blkp = NEXT_BLKP(next_blkp);
+
+      size_t next_alloc = GET_ALLOC(HDRP(next_blkp));
+
+      PUT(HDRP(next_blkp), PACK(GET_SIZE(HDRP(next_blkp)), next_alloc, 0));
+      if(!next_alloc) {
+        PUT(FTRP(next_blkp), PACK(GET_SIZE(HDRP(next_blkp)), next_alloc, 0));
+      }
+    }
+  
+    coalesce_front(old_ptr);
+
+    PUT(HDRP(old_ptr), PACK(r_size, 1, GET_PFREE(HDRP(old_ptr))));
+
+    return old_ptr;
+  }   
 
   void *new_ptr = malloc(size);
 
