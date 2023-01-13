@@ -221,9 +221,12 @@ static inline void *find_block(size_t size) {
       int diff =
         GET_SIZE(HDRP(new_block_ptr)) - size; // diff can be negative !!!
 
-      if (diff >= 0 && diff < min_diff) {
+      if (diff > 0 && diff < min_diff) {
         min_diff = diff;
         min_ptr = new_block_ptr;
+
+      } else if(diff == 0) {
+        return new_block_ptr; 
       }
 
       new_block_ptr = NEXT_FREE_BLKP(new_block_ptr);
@@ -240,10 +243,10 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * split - Split given block if needed; returns size of the possibly split block
+ * split - Split given block if needed; returns pointer to the free block of desired size
  */
 
-static inline size_t split(void *ptr, size_t size) {
+static inline void *split(void *ptr, size_t size) {
 
   assert(GET_ALLOC(HDRP(ptr)) == 0);
 
@@ -251,27 +254,26 @@ static inline size_t split(void *ptr, size_t size) {
   int diff = ptr_size - size;
 
   if (diff < ALIGNMENT) { // minimal size requirement
-    return ptr_size;
+    return ptr;
   }
 
   size_t pfree = GET_PFREE(HDRP(ptr));
-  // splitting
-  PUT(HDRP(ptr), PACK(size, 0, pfree)); // soon to be allocated block header
-  PUT(FTRP(ptr), PACK(size, 0, pfree)); // soon to be allocated block footer
+  
+  // free block
+  PUT(HDRP(ptr), PACK(diff, 0, pfree));
+  PUT(FTRP(ptr), PACK(diff, 0, pfree)); 
 
   /*
    * could allocate the latter block so when the free block
    * stays in the same size class sfl doesn't have to be altered
    */
-  // remove_from_sfl(ptr, find_index(ptr_size));
-  // free block
+  
+  // soon to be allocated block
   void *next_blkp = NEXT_BLKP(ptr);
-  PUT(HDRP(next_blkp), PACK(diff, 0, 0)); // free block header
-  PUT(FTRP(next_blkp), PACK(diff, 0, 0)); // free block footer
+  PUT(HDRP(next_blkp), PACK(size, 0, 2));
+  PUT(FTRP(next_blkp), PACK(size, 0, 2));
 
-  add_to_sfl(next_blkp);
-
-  return size;
+  return next_blkp;
 }
 
 /*
@@ -390,17 +392,23 @@ void *malloc(size_t size) {
 
   if (free_blkp) {
     size_t old_size = GET_SIZE(HDRP(free_blkp));
-    size_t new_size = split(free_blkp, size);
+    void *split_blkp = split(free_blkp, size);
+    int old_size_index = find_index(old_size);
 
-    remove_from_sfl(free_blkp, find_index(old_size));
-
+    if (split_blkp == free_blkp || (find_index(old_size - size) != old_size_index)) {
+      remove_from_sfl(free_blkp, old_size_index);
+      if (split_blkp != free_blkp) {
+          add_to_sfl(free_blkp);
+      }
+    }
+    
     // marking the block as allocated
-    PUT(HDRP(free_blkp), PACK(new_size, 1, GET_PFREE(HDRP(free_blkp))));
+    PUT(HDRP(split_blkp), PACK(size, 1, GET_PFREE(HDRP(split_blkp))));
 
-    void *next_blkh = HDRP(NEXT_BLKP(free_blkp));
+    void *next_blkh = HDRP(NEXT_BLKP(split_blkp));
     PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0));
     allocated++;
-    return free_blkp;
+    return split_blkp;
   }
 
   size_t mem_incr = ROUND_MEM(size);
@@ -410,18 +418,20 @@ void *malloc(size_t size) {
 
   PUT(HDRP(free_blkp), PACK(mem_incr, 0, pfree));
 
-  size_t new_size = split(free_blkp, size);
-  PUT(HDRP(free_blkp), PACK(size, 1, pfree));
+  void *split_blkp = split(free_blkp, size);
+  
+  if(split_blkp != free_blkp) {
+    add_to_sfl(free_blkp);
+    PUT(HDRP(split_blkp), PACK(size, 1, 2));
+  } else {
+    PUT(HDRP(split_blkp), PACK(size, 1, pfree));
+  }
 
   epilogue_blkp += mem_incr; // HDRP(NEXT_BLKP(free_blkp));
-
-  /* if block was not split previous block of epilogue header is allocated
-   * otherwise its free */
-  PUT(epilogue_blkp,
-      PACK(0, 1, new_size == mem_incr ? 0 : 2)); // new epilogue header
+  PUT(epilogue_blkp, PACK(0, 1, 0)); // new epilogue header
 
   allocated++;
-  return free_blkp;
+  return split_blkp;
 }
 
 /*
@@ -465,7 +475,7 @@ void *realloc(void *old_ptr, size_t size) {
   /* If old_ptr is NULL, then this is just malloc. */
   if (!old_ptr)
     return malloc(size);
-
+  
   void *new_ptr = malloc(size);
 
   /* If malloc() fails, the original block is left untouched. */
@@ -505,7 +515,7 @@ void mm_checkheap(int verbose) {
 
   static int check_num = 0;
   check_num++;
-  printf("----- checking ----- %d === %d\n", check_num, allocated);
+  printf("----- checking ----- %d allocated:  %d\n", check_num, allocated);
 
   char *blk_check = heap_start + DSIZE;
   int blk_num = 0;
@@ -516,8 +526,7 @@ void mm_checkheap(int verbose) {
     while (blk_check < epilogue_blkp) {
 
       printf("block number: %d size: %u ", blk_num, GET_SIZE(HDRP(blk_check)));
-      printf("address: %p alloc: %d pfree: %d\n", blk_check,
-             GET_ALLOC(HDRP(blk_check)), GET_PFREE(HDRP(blk_check)));
+      printf("alloc: %d pfree: %d address: %p\n", GET_ALLOC(HDRP(blk_check)), GET_PFREE(HDRP(blk_check)), blk_check);
       blk_num++;
       blk_check = NEXT_BLKP(blk_check);
     }
