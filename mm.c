@@ -9,7 +9,6 @@
  * This code is correct and blazingly fast, but very bad usage-wise since
  * it never frees anything.
  */
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,18 +50,20 @@
 /* Pack size, allocated bit and previous free bit into a word */
 #define PACK(size, alloc, pfree) ((size) | (alloc) | (pfree))
 
-/* calulate distance between two base pointers with one unit being equal to
+/* calulate distance between two pointers with one unit being equal to
  * ALIGNMENT*/
 #define DISTANCE_BETWEEN(p1, p2) ((p1 && p2) ? (p1 - p2) / ALIGNMENT : 0)
 
-/* Read and write a word at address p */
-#define GET(p) (*(unsigned int *)(p))
-#define GETS(p) (*(int *)(p))   // read signed integer value
-#define GETP(p) (*(void **)(p)) // read pointer from adress p
+/* Read a word at address p */
+#define GET(p) (*(unsigned int *)(p)) // read unsigned integer value
+#define GETS(p) (*(int *)(p))         // read signed integer value
+#define GETP(p) (*(void **)(p))       // read a pointer
 
-#define PUT(p, val) (*(unsigned int *)(p) = (val))
+/* Write a word at addres p */
+#define PUT(p, val)                                                            \
+  (*(unsigned int *)(p) = (val))               // write unsigned integer value
 #define PUTS(p, val) (*(int *)(p) = (val))     // write signed integer value
-#define PUTP(p, pval) (*(void **)(p) = (pval)) // write a pointer at address p
+#define PUTP(p, pval) (*(void **)(p) = (pval)) // write a pointer
 
 /* Read the size, allocated and previous free fields from address p */
 #define GET_SIZE(p) (GET(p) & ~0x7)
@@ -93,10 +94,12 @@
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp)                                                          \
   ((char *)(bp)-GET_SIZE(                                                      \
-    ((char *)(bp)-DSIZE))) // only to be used when it is known that previous
+    ((char *)(bp)-DSIZE))) // only to be used when it is known that the previous
                            // block is free
 
+/* Round size to ALIGNMENT */
 #define ROUND(size) ((size + ALIGNMENT - 1) & -ALIGNMENT)
+/* Round size to CHUNK_SIZE */
 #define ROUND_MEM(size) ((size + CHUNK_SIZE - 1) & -CHUNK_SIZE)
 
 #define SINGULAR_BLOCKS_NUM                                                    \
@@ -115,27 +118,52 @@
 static char *heap_start;    /* Address of the prologue footer */
 static char *epilogue_blkp; /* Points at epilogue header */
 static void *sfl_start;     /* Adress of first list in segregated free lists*/
-static int allocated = 0;
 
 /*
- * segregated free lists in which free blocks ranging
- * in size from 16 to 256 bytes have its own list
- * and the rest is put into power of two size classes
+ * Segregated free lists in which free blocks ranging in size from 16 to 256
+bytes
+ * are put into their own lists and the rest is put into power of two size
+classes.
+ *
+ * Headers and footers store information about size and allocation of the block
+and
+ * whether the previous block is free.
+ * Headers and footers are unsigned integers and take 4 bytes.
+ *
+ * Allocated blocks only have headers.
+ * Free blocks have headers footers and store information
+ * about the next and previous free blocks in the list
+ *
+ * The next free block and previous free block field are signed integers and
+ * indicate the distance between the blocks with one unit being equal to
+ALIGNMENT.
+ *
+ *  Free block structure:
+ *
+ *  |============================================|
+ *  |        | NEXT  | PREVIOUS |       |        |
+ *  | HEADER | FREE  | FREE     |  ...  | FOOTER |
+ *  |        | BLOCK | BLOCK    |       |        |
+ *  |============================================|
+ *
  */
 
-/* TO DO:
- * Realloc optimization
- * Maybe better splitting
- * Maybe increase number of singular and ranged block lists
+/*
+ * find_index - depending on size find index of list
+ * that stores blocks of that size
+ * It utilizes the count leading zeros function to
+ * determine which range given size falls into
  */
 
 static inline int find_index(size_t size) {
 
-  int leading_zeros = __builtin_clz(size);
-
   if (size <= SINGULAR_BLOCKS_NUM * ALIGNMENT) {
     return (size / ALIGNMENT) - 1;
-  } else if (leading_zeros <= HIGHEST_LEADING_ZEROS) {
+  }
+
+  int leading_zeros = __builtin_clz(size);
+
+  if (leading_zeros <= HIGHEST_LEADING_ZEROS) {
     return SFL_SIZE - 1;
   }
 
@@ -147,13 +175,10 @@ static inline int find_index(size_t size) {
  */
 static inline void add_to_sfl(void *ptr) {
 
-  assert(GET_ALLOC(HDRP(ptr)) == 0);
-
   size_t size = GET_SIZE(HDRP(ptr));
   int index = find_index(size);
   void *first_blkp = ADD_VOIDP(sfl_start, index);
 
-  assert((GETP(first_blkp) - ptr) % ALIGNMENT == 0);
   int distance = DISTANCE_BETWEEN(GETP(first_blkp), ptr);
 
   PUTS(ptr, distance);
@@ -224,8 +249,8 @@ static inline void *find_block(size_t size) {
         min_diff = diff;
         min_ptr = new_block_ptr;
 
-      } else if(diff == 0) {
-        return new_block_ptr; 
+      } else if (diff == 0) {
+        return new_block_ptr;
       }
 
       new_block_ptr = NEXT_FREE_BLKP(new_block_ptr);
@@ -242,12 +267,11 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * split - Split given block if needed; returns pointer to the free block of desired size
+ * split - Split given block if needed; returns pointer to the free block of
+ * desired size
  */
 
 static inline void *split(void *ptr, size_t size) {
-
-  assert(GET_ALLOC(HDRP(ptr)) == 0);
 
   size_t ptr_size = GET_SIZE(HDRP(ptr));
   int diff = ptr_size - size;
@@ -259,16 +283,11 @@ static inline void *split(void *ptr, size_t size) {
   }
 
   size_t pfree = GET_PFREE(HDRP(ptr));
-  
+
   // free block
   PUT(HDRP(ptr), PACK(diff, 0, pfree));
-  PUT(FTRP(ptr), PACK(diff, 0, pfree)); 
+  PUT(FTRP(ptr), PACK(diff, 0, pfree));
 
-  /*
-   * could allocate the latter block so when the free block
-   * stays in the same size class sfl doesn't have to be altered
-   */
-  
   // soon to be allocated block
   void *next_blkp = NEXT_BLKP(ptr);
   PUT(HDRP(next_blkp), PACK(size, 0, 2));
@@ -283,7 +302,7 @@ static void *coalesce_front(void *ptr) {
   size_t size = GET_SIZE(HDRP(ptr));
 
   if (!next_alloc) { // next block is free
-    
+
     void *next_blkp = NEXT_BLKP(ptr);
     size_t next_size = GET_SIZE(HDRP(next_blkp));
 
@@ -298,14 +317,14 @@ static void *coalesce_front(void *ptr) {
   }
 
   return ptr;
-} 
+}
 
 static void *coalesce_back(void *ptr) {
-  
+
   size_t prev_alloc = !GET_PFREE(HDRP(ptr));
   size_t size = GET_SIZE(HDRP(ptr));
 
-  if(!prev_alloc) {
+  if (!prev_alloc) {
 
     void *prev_blkp = PREV_BLKP(ptr);
     size_t prev_size = GET_SIZE(HDRP(prev_blkp));
@@ -318,7 +337,7 @@ static void *coalesce_back(void *ptr) {
 
     PUT(HDRP(prev_blkp), PACK(size, 0, pfree));
     PUT(FTRP(ptr), PACK(size, 0, pfree));
-    
+
     return prev_blkp;
   }
 
@@ -331,6 +350,7 @@ static void *coalesce_back(void *ptr) {
 int mm_init(void) {
 
   heap_start = mem_sbrk(PSIZE * SFL_SIZE + WSIZE + 3 * WSIZE);
+
   /* SFL_SIZE is area dedicated for segregated free lists
    * every entry in the segregated free list array is a pointer to void thus 8
    * bytes WSIZE is alignment padding 3 * WSIZE is prologue header, prologue
@@ -350,7 +370,6 @@ int mm_init(void) {
   heap_start += SFL_SIZE * PSIZE;
 
   /* Alignment padding */
-  // TO DO: if SFL_SIZE changes alignment padding is adequately changed too
   PUT(heap_start, 0);
 
   PUT(heap_start + (1 * WSIZE), PACK(WSIZE, 1, 0)); /* Prologue header */
@@ -374,24 +393,24 @@ void *malloc(size_t size) {
   void *free_blkp = find_block(size);
 
   if (free_blkp) {
-    
+
     size_t old_size = GET_SIZE(HDRP(free_blkp));
     void *split_blkp = split(free_blkp, size);
     int old_size_index = find_index(old_size);
 
-    if (split_blkp == free_blkp || (find_index(old_size - size) != old_size_index)) {
+    if (split_blkp == free_blkp ||
+        (find_index(old_size - size) != old_size_index)) {
       remove_from_sfl(free_blkp, old_size_index);
       if (split_blkp != free_blkp) {
-          add_to_sfl(free_blkp);
+        add_to_sfl(free_blkp);
       }
     }
-    
+
     // marking the block as allocated
     PUT(HDRP(split_blkp), PACK(size, 1, GET_PFREE(HDRP(split_blkp))));
 
     void *next_blkh = HDRP(NEXT_BLKP(split_blkp));
     PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 0));
-    allocated++;
     return split_blkp;
   }
 
@@ -403,18 +422,17 @@ void *malloc(size_t size) {
   PUT(HDRP(free_blkp), PACK(mem_incr, 0, pfree));
 
   void *split_blkp = split(free_blkp, size);
-  
-  if(split_blkp != free_blkp) {
+
+  if (split_blkp != free_blkp) {
     add_to_sfl(free_blkp);
     PUT(HDRP(split_blkp), PACK(size, 1, 2));
   } else {
     PUT(HDRP(split_blkp), PACK(size, 1, pfree));
   }
 
-  epilogue_blkp += mem_incr; // HDRP(NEXT_BLKP(free_blkp));
+  epilogue_blkp += mem_incr;
   PUT(epilogue_blkp, PACK(0, 1, 0)); // new epilogue header
 
-  allocated++;
   return split_blkp;
 }
 
@@ -424,7 +442,6 @@ void *malloc(size_t size) {
  */
 void free(void *ptr) {
 
-  // printf("free...\n");
   if (ptr == NULL) {
     return;
   }
@@ -443,7 +460,6 @@ void free(void *ptr) {
   coalesce_front(ptr);
   ptr = coalesce_back(ptr);
   add_to_sfl(ptr);
-  allocated--;
 }
 
 /*
@@ -460,10 +476,10 @@ void *realloc(void *old_ptr, size_t size) {
   /* If old_ptr is NULL, then this is just malloc. */
   if (!old_ptr)
     return malloc(size);
- 
+
   size_t old_size = GET_SIZE(HDRP(old_ptr));
-  
-  if(old_size - WSIZE >= size) {
+
+  if (old_size - WSIZE >= size) {
     return old_ptr;
   }
 
@@ -471,13 +487,12 @@ void *realloc(void *old_ptr, size_t size) {
   size_t next_blk_size = GET_SIZE(HDRP(next_blkp));
   size_t r_size = ROUND(size + WSIZE);
 
-  if(!GET_ALLOC(HDRP(next_blkp)) && 
-      next_blk_size + old_size >= r_size) {
-    
+  if (!GET_ALLOC(HDRP(next_blkp)) && next_blk_size + old_size >= r_size) {
+
     remove_from_sfl(next_blkp, find_index(next_blk_size));
     void *split_blkp = split(next_blkp, next_blk_size + old_size - r_size);
-    
-    if(split_blkp != next_blkp) {
+
+    if (split_blkp != next_blkp) {
       add_to_sfl(split_blkp);
       PUT(HDRP(split_blkp), PACK(GET_SIZE(HDRP(split_blkp)), 0, 0));
       PUT(FTRP(split_blkp), PACK(GET_SIZE(HDRP(split_blkp)), 0, 0));
@@ -487,17 +502,17 @@ void *realloc(void *old_ptr, size_t size) {
       size_t next_alloc = GET_ALLOC(HDRP(next_blkp));
 
       PUT(HDRP(next_blkp), PACK(GET_SIZE(HDRP(next_blkp)), next_alloc, 0));
-      if(!next_alloc) {
+      if (!next_alloc) {
         PUT(FTRP(next_blkp), PACK(GET_SIZE(HDRP(next_blkp)), next_alloc, 0));
       }
     }
-  
+
     coalesce_front(old_ptr);
 
     PUT(HDRP(old_ptr), PACK(r_size, 1, GET_PFREE(HDRP(old_ptr))));
 
     return old_ptr;
-  }   
+  }
 
   void *new_ptr = malloc(size);
 
@@ -537,7 +552,7 @@ void mm_checkheap(int verbose) {
 
   static int check_num = 0;
   check_num++;
-  printf("----- checking ----- %d allocated:  %d\n", check_num, allocated);
+  printf("----- checking ----- %d\n", check_num);
 
   char *blk_check = heap_start + DSIZE;
   int blk_num = 0;
@@ -548,7 +563,8 @@ void mm_checkheap(int verbose) {
     while (blk_check < epilogue_blkp) {
 
       printf("block number: %d size: %u ", blk_num, GET_SIZE(HDRP(blk_check)));
-      printf("alloc: %d pfree: %d address: %p\n", GET_ALLOC(HDRP(blk_check)), GET_PFREE(HDRP(blk_check)), blk_check);
+      printf("alloc: %d pfree: %d address: %p\n", GET_ALLOC(HDRP(blk_check)),
+             GET_PFREE(HDRP(blk_check)), blk_check);
       blk_num++;
       blk_check = NEXT_BLKP(blk_check);
     }
