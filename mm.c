@@ -163,8 +163,9 @@ to the segregated free lists.
  */
 
 /*
- * find_index - depending on size find index of list that stores blocks of that size
- * It utilizes the count leading zeros function to determine which range given size falls into.
+ * find_index - depending on size find index of list that stores blocks of that
+ * size It utilizes the count leading zeros function to determine which range
+ * given size falls into.
  */
 
 static inline int find_index(size_t size) {
@@ -236,8 +237,9 @@ static inline void remove_from_sfl(void *ptr, int index) {
 
 /*
  * find_block - Find a block with enough size.
- * If the size is smaller or equal than SINGULAR_BLOCKS_NUM * ALIGNMENT then it just returns the first block in the list. 
- * Else it tries to find the best fit for the block in the list determined by find_size function.
+ * If the size is smaller or equal than SINGULAR_BLOCKS_NUM * ALIGNMENT then it
+ * just returns the first block in the list. Else it tries to find the best fit
+ * for the block in the list determined by find_size function.
  */
 
 static inline void *find_block(size_t size) {
@@ -290,8 +292,10 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * split - Split given block if needed; returns pointer to the free block of desired size. 
- * It does the splitting abnormally so that the first block is the one to remain free and the second is the one to which the pointer is returned.
+ * split - Split given block if needed; returns pointer to the free block of
+ * desired size. It does the splitting abnormally so that the first block is the
+ * one to remain free and the second is the one to which the pointer is
+ * returned.
  */
 static inline void *split(void *ptr, size_t size) {
 
@@ -449,7 +453,8 @@ void *malloc(size_t size) {
     return split_blkp;
   }
 
-  /* Suitable block was not found in the segregated free lists so increasing the heap */
+  /* Suitable block was not found in the segregated free lists so increasing the
+   * heap */
   size_t mem_incr = ROUND_MEM(size);
   free_blkp = mem_sbrk(mem_incr);
 
@@ -458,7 +463,7 @@ void *malloc(size_t size) {
   PUT(HDRP(free_blkp), PACK(mem_incr, 0, pfree));
 
   void *split_blkp = split(free_blkp, size);
-  
+
   /* If block was split add the remaining part to the sfl */
   if (split_blkp != free_blkp) {
     add_to_sfl(free_blkp);
