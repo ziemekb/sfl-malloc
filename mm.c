@@ -217,6 +217,14 @@ static inline void remove_from_sfl(void *ptr, int index) {
   }
 }
 
+/*
+ * find_block - Find a block of enough size. 
+ * If the size is smaller or equal than SINGULAR_BLOCKS_NUM * ALIGNMENT
+ * then it just returns the first block in the list.
+ * Else it tries to find the best fit for the block in the 
+ * list determined by find_size function. 
+ */
+
 static inline void *find_block(size_t size) {
 
   int index = find_index(size); // smallest index that may fit the block
@@ -268,7 +276,9 @@ static inline void *find_block(size_t size) {
 
 /*
  * split - Split given block if needed; returns pointer to the free block of
- * desired size
+ * desired size.
+ * It does the splitting abnormally so that the first block is the one to 
+ * remain free and the second one to which the pointer is returned.
  */
 
 static inline void *split(void *ptr, size_t size) {
@@ -296,6 +306,9 @@ static inline void *split(void *ptr, size_t size) {
   return next_blkp;
 }
 
+/*
+ * coalesce_front - Possibly coalesce the block in the front
+ */
 static void *coalesce_front(void *ptr) {
 
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
@@ -319,6 +332,9 @@ static void *coalesce_front(void *ptr) {
   return ptr;
 }
 
+/*
+ * coalesce_back - Possibly coalesce the block in the back.
+ */
 static void *coalesce_back(void *ptr) {
 
   size_t prev_alloc = !GET_PFREE(HDRP(ptr));
@@ -383,8 +399,9 @@ int mm_init(void) {
 }
 
 /*
- * malloc - Allocate a block by incrementing the brk pointer.
- *      Always allocate a block whose size is a multiple of the alignment.
+ * malloc - Allocate a block by finding a free one in segregated free lists
+ * or by allocating a chunk of size CHUNK_SIZE and then splitting it if necessary. 
+ * Always allocate a block whose size is a multiple of the alignment.
  */
 void *malloc(size_t size) {
 
@@ -437,8 +454,7 @@ void *malloc(size_t size) {
 }
 
 /*
- * free - We don't know how to free a block.  So we ignore this call.
- *      Computers have big memories; surely it won't be a problem.
+ * free - Free a block, coalesce if possible and add it to segregated free list
  */
 void free(void *ptr) {
 
@@ -463,8 +479,8 @@ void free(void *ptr) {
 }
 
 /*
- * realloc - Change the size of the block by mallocing a new block,
- *      copying its data, and freeing the old block.
+ * realloc - Change the size of the block by coalescing block in the front
+ * or by calling malloc and copying the data.
  */
 void *realloc(void *old_ptr, size_t size) {
   /* If size == 0 then this is just free, and we return NULL. */
@@ -478,15 +494,31 @@ void *realloc(void *old_ptr, size_t size) {
     return malloc(size);
 
   size_t old_size = GET_SIZE(HDRP(old_ptr));
+  size_t r_size = ROUND(size + WSIZE);
+  
+  /* if the requested size is smaller or equal than the currently allocated */
+  if (old_size == r_size) {
+    return old_ptr;
+  } else if (old_size > r_size) {
+    
+    PUT(HDRP(old_ptr), PACK(r_size, 1, GET_PFREE(HDRP(old_ptr))));
 
-  if (old_size - WSIZE >= size) {
+    void *next_blkp = NEXT_BLKP(old_ptr);
+    PUT(HDRP(next_blkp), PACK(old_size - r_size, 0, 0));
+    PUT(FTRP(next_blkp), PACK(old_size - r_size, 0, 0));
+
+    add_to_sfl(next_blkp);
+
     return old_ptr;
   }
 
   void *next_blkp = NEXT_BLKP(old_ptr);
   size_t next_blk_size = GET_SIZE(HDRP(next_blkp));
-  size_t r_size = ROUND(size + WSIZE);
 
+  /* if the next block is free and sufficient size, 
+   * coalesce current and next block.
+   * It also splits the next block if it is too big.
+   */
   if (!GET_ALLOC(HDRP(next_blkp)) && next_blk_size + old_size >= r_size) {
 
     remove_from_sfl(next_blkp, find_index(next_blk_size));
@@ -520,9 +552,7 @@ void *realloc(void *old_ptr, size_t size) {
   if (!new_ptr)
     return NULL;
 
-  /* Copy the old data. */
-  if (size < old_size)
-    old_size = size;
+  /* copy the data */
   memcpy(new_ptr, old_ptr, old_size);
 
   /* Free the old block. */
@@ -546,7 +576,7 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 /*
- * mm_checkheap - So simple, it doesn't need a checker!
+ * mm_checkheap - Just some debugging information 
  */
 void mm_checkheap(int verbose) {
 
