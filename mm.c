@@ -1,13 +1,8 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  Blocks are never coalesced or reused.  The size of
- * a block is found at the first aligned word before the block (we need
- * it for realloc).
- *
- * This code is correct and blazingly fast, but very bad usage-wise since
- * it never frees anything.
+ * Ziemowit Bączewski 324331
+ * I am the sole author of this source code.
+ * Some of the macros are taken from CSAPP book.
+ * I tried following the notation presented in the book.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,8 +39,6 @@
 #define DSIZE 8              /* Double word size*/
 #define PSIZE 8              /* Size of pointer in bytes */
 #define CHUNK_SIZE (1 << 12) /* Size of memory chunk*/
-
-#define PFREE 0x2
 
 /* Pack size, allocated bit and previous free bit into a word */
 #define PACK(size, alloc, pfree) ((size) | (alloc) | (pfree))
@@ -120,14 +113,12 @@ static char *epilogue_blkp; /* Points at epilogue header */
 static void *sfl_start;     /* Adress of first list in segregated free lists*/
 
 /*
- * Segregated free lists in which free blocks ranging in size from 16 to 256
-bytes
- * are put into their own lists and the rest is put into power of two size
-classes.
+ * Memory allocator utilizes segregated free lists.
+ * free blocks ranging in size from 16 to 256 bytes are put into their own lists
+and the rest is put into power of two size classes.
  *
  * Headers and footers store information about size and allocation of the block
-and
- * whether the previous block is free.
+and whether the previous block is free.
  * Headers and footers are unsigned integers and take 4 bytes.
  *
  * Allocated blocks only have headers.
@@ -146,13 +137,34 @@ ALIGNMENT.
  *  |        | BLOCK | BLOCK    |       |        |
  *  |============================================|
  *
+ *  Allocated block structure:
+ *
+ *  |==================|
+ *  |        |         |
+ *  | HEADER | PAYLOAD |
+ *  |        |         |
+ *  |==================|
+ *
+ *
+ *  Memory allocation:
+ *  First, algorithm tries to find a sufficiently sized block with find_block()
+function. If it finds a good block it splits it if needed and returns pointer to
+the block of desired size. If a free block of asked size or larger is not found
+in the segregated free list, heap is increased by CHUNK_SIZE. Then the chunk is
+split if needed and pointer to a block of requested size is returned. If a block
+was split, the free part is added to the segregated free list.
+ *
+ *  Freeing memory:
+ *  Freeing is straightforward. Block is marked as free in header and footer is
+added. Previous block field is changed in the next block. The newly freed block
+is then coalesced with adjoining blocks if possible. Finally, the block is added
+to the segregated free lists.
+ *
  */
 
 /*
- * find_index - depending on size find index of list
- * that stores blocks of that size
- * It utilizes the count leading zeros function to
- * determine which range given size falls into
+ * find_index - depending on size find index of list that stores blocks of that size
+ * It utilizes the count leading zeros function to determine which range given size falls into.
  */
 
 static inline int find_index(size_t size) {
@@ -194,6 +206,7 @@ static inline void add_to_sfl(void *ptr) {
 
 /*
  * remove_from_sfl - Remove block from segregated free list
+ * Index to the segregated free list can be passed.
  */
 static inline void remove_from_sfl(void *ptr, int index) {
 
@@ -209,6 +222,10 @@ static inline void remove_from_sfl(void *ptr, int index) {
     PUTS(prev_free_blkp, distance);
   } else { // if ptr was the first block we assign the next block as the
            // beginning of list
+    if (index < 0) {
+      index = find_index(GET_SIZE(HDRP(ptr)));
+    }
+
     PUTP(ADD_VOIDP(sfl_start, index), next_free_blkp);
   }
 
@@ -218,11 +235,9 @@ static inline void remove_from_sfl(void *ptr, int index) {
 }
 
 /*
- * find_block - Find a block of enough size. 
- * If the size is smaller or equal than SINGULAR_BLOCKS_NUM * ALIGNMENT
- * then it just returns the first block in the list.
- * Else it tries to find the best fit for the block in the 
- * list determined by find_size function. 
+ * find_block - Find a block with enough size.
+ * If the size is smaller or equal than SINGULAR_BLOCKS_NUM * ALIGNMENT then it just returns the first block in the list. 
+ * Else it tries to find the best fit for the block in the list determined by find_size function.
  */
 
 static inline void *find_block(size_t size) {
@@ -250,20 +265,20 @@ static inline void *find_block(size_t size) {
     void *min_ptr = NULL;
 
     while (new_block_ptr) {
-      int diff =
-        GET_SIZE(HDRP(new_block_ptr)) - size; // diff can be negative !!!
+      int diff = GET_SIZE(HDRP(new_block_ptr)) - size; // diff can be negative
 
       if (diff > 0 && diff < min_diff) {
         min_diff = diff;
         min_ptr = new_block_ptr;
 
-      } else if (diff == 0) {
+      } else if (diff == 0) { // if block has perfect size return it
         return new_block_ptr;
       }
 
       new_block_ptr = NEXT_FREE_BLKP(new_block_ptr);
     }
 
+    /* if none of the blocks in the list are sufficient size, continue */
     if (!min_ptr) {
       continue;
     }
@@ -275,12 +290,9 @@ static inline void *find_block(size_t size) {
 }
 
 /*
- * split - Split given block if needed; returns pointer to the free block of
- * desired size.
- * It does the splitting abnormally so that the first block is the one to 
- * remain free and the second one to which the pointer is returned.
+ * split - Split given block if needed; returns pointer to the free block of desired size. 
+ * It does the splitting abnormally so that the first block is the one to remain free and the second is the one to which the pointer is returned.
  */
-
 static inline void *split(void *ptr, size_t size) {
 
   size_t ptr_size = GET_SIZE(HDRP(ptr));
@@ -319,7 +331,7 @@ static void *coalesce_front(void *ptr) {
     void *next_blkp = NEXT_BLKP(ptr);
     size_t next_size = GET_SIZE(HDRP(next_blkp));
 
-    remove_from_sfl(next_blkp, find_index(next_size));
+    remove_from_sfl(next_blkp, -1);
 
     size += next_size;
 
@@ -345,7 +357,7 @@ static void *coalesce_back(void *ptr) {
     void *prev_blkp = PREV_BLKP(ptr);
     size_t prev_size = GET_SIZE(HDRP(prev_blkp));
 
-    remove_from_sfl(prev_blkp, find_index(prev_size));
+    remove_from_sfl(prev_blkp, -1);
 
     size += prev_size;
 
@@ -367,10 +379,10 @@ int mm_init(void) {
 
   heap_start = mem_sbrk(PSIZE * SFL_SIZE + WSIZE + 3 * WSIZE);
 
-  /* SFL_SIZE is area dedicated for segregated free lists
-   * every entry in the segregated free list array is a pointer to void thus 8
-   * bytes WSIZE is alignment padding 3 * WSIZE is prologue header, prologue
-   * footer and epilogue header
+  /* SFL_SIZE is number of segregated free lists.
+   * PSIZE * SFL_SIZE for segregated free lists array
+   * WSIZE for alignment padding
+   * 3 * WSIZE for prologue header, prologue footer and epilogue header
    */
 
   if (heap_start < 0) {
@@ -379,6 +391,7 @@ int mm_init(void) {
 
   sfl_start = (void *)heap_start;
 
+  /* Segregated free lists array */
   for (int i = 0; i < SFL_SIZE; ++i) {
     PUTP(ADD_VOIDP(sfl_start, i), NULL);
   }
@@ -399,9 +412,9 @@ int mm_init(void) {
 }
 
 /*
- * malloc - Allocate a block by finding a free one in segregated free lists
- * or by allocating a chunk of size CHUNK_SIZE and then splitting it if necessary. 
- * Always allocate a block whose size is a multiple of the alignment.
+ * malloc - Allocate a block by finding a free one in segregated free lists or
+ * by allocating a chunk of size CHUNK_SIZE and then splitting it if necessary.
+ * Always allocate a block which size is a multiple of ALIGNMENT
  */
 void *malloc(size_t size) {
 
@@ -409,21 +422,26 @@ void *malloc(size_t size) {
 
   void *free_blkp = find_block(size);
 
+  /* free block in the sfl is found */
   if (free_blkp) {
 
     size_t old_size = GET_SIZE(HDRP(free_blkp));
     void *split_blkp = split(free_blkp, size);
     int old_size_index = find_index(old_size);
 
+    /* remove the block from sfl if the found block is perfect size or when
+     * splitting the block resulted in moving it to another size class */
     if (split_blkp == free_blkp ||
         (find_index(old_size - size) != old_size_index)) {
       remove_from_sfl(free_blkp, old_size_index);
+
+      /* add split block back to sfl */
       if (split_blkp != free_blkp) {
         add_to_sfl(free_blkp);
       }
     }
 
-    // marking the block as allocated
+    /* marking the block as allocated */
     PUT(HDRP(split_blkp), PACK(size, 1, GET_PFREE(HDRP(split_blkp))));
 
     void *next_blkh = HDRP(NEXT_BLKP(split_blkp));
@@ -431,6 +449,7 @@ void *malloc(size_t size) {
     return split_blkp;
   }
 
+  /* Suitable block was not found in the segregated free lists so increasing the heap */
   size_t mem_incr = ROUND_MEM(size);
   free_blkp = mem_sbrk(mem_incr);
 
@@ -439,7 +458,8 @@ void *malloc(size_t size) {
   PUT(HDRP(free_blkp), PACK(mem_incr, 0, pfree));
 
   void *split_blkp = split(free_blkp, size);
-
+  
+  /* If block was split add the remaining part to the sfl */
   if (split_blkp != free_blkp) {
     add_to_sfl(free_blkp);
     PUT(HDRP(split_blkp), PACK(size, 1, 2));
@@ -447,6 +467,7 @@ void *malloc(size_t size) {
     PUT(HDRP(split_blkp), PACK(size, 1, pfree));
   }
 
+  /* Move epilogue header */
   epilogue_blkp += mem_incr;
   PUT(epilogue_blkp, PACK(0, 1, 0)); // new epilogue header
 
@@ -468,9 +489,8 @@ void free(void *ptr) {
   PUT(HDRP(ptr), PACK(size, 0, pfree));
   PUT(FTRP(ptr), PACK(size, 0, pfree));
 
-  /* switching previous free bit in the next block*/
-
   void *next_blkh = HDRP(NEXT_BLKP(ptr));
+  /* switching previous free bit in the next block */
   PUT(next_blkh, PACK(GET_SIZE(next_blkh), GET_ALLOC(next_blkh), 2));
 
   coalesce_front(ptr);
@@ -495,12 +515,12 @@ void *realloc(void *old_ptr, size_t size) {
 
   size_t old_size = GET_SIZE(HDRP(old_ptr));
   size_t r_size = ROUND(size + WSIZE);
-  
-  /* if the requested size is smaller or equal than the currently allocated */
+
+  /* If the requested size is smaller or equal than the currently allocated */
   if (old_size == r_size) {
     return old_ptr;
   } else if (old_size > r_size) {
-    
+
     PUT(HDRP(old_ptr), PACK(r_size, 1, GET_PFREE(HDRP(old_ptr))));
 
     void *next_blkp = NEXT_BLKP(old_ptr);
@@ -515,13 +535,12 @@ void *realloc(void *old_ptr, size_t size) {
   void *next_blkp = NEXT_BLKP(old_ptr);
   size_t next_blk_size = GET_SIZE(HDRP(next_blkp));
 
-  /* if the next block is free and sufficient size, 
-   * coalesce current and next block.
-   * It also splits the next block if it is too big.
+  /* If the next block is free and sufficient size, coalesce current and next
+   * block. It also splits the next block if it's too big.
    */
   if (!GET_ALLOC(HDRP(next_blkp)) && next_blk_size + old_size >= r_size) {
 
-    remove_from_sfl(next_blkp, find_index(next_blk_size));
+    remove_from_sfl(next_blkp, -1);
     void *split_blkp = split(next_blkp, next_blk_size + old_size - r_size);
 
     if (split_blkp != next_blkp) {
@@ -576,7 +595,7 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 /*
- * mm_checkheap - Just some debugging information 
+ * mm_checkheap - Just some debugging information
  */
 void mm_checkheap(int verbose) {
 
