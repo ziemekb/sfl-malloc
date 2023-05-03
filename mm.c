@@ -1,9 +1,3 @@
-/*
- * Ziemowit Bączewski 324331
- * I am the sole author of this source code.
- * Some of the macros are taken from CSAPP book.
- * I tried following the notation presented in the book.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,7 +107,7 @@ static char *epilogue_blkp; /* Points at epilogue header */
 static void *sfl_start;     /* Adress of first list in segregated free lists*/
 
 /*
- * Memory allocator utilizes segregated free lists.
+ * Memory allocator utilizes segregated free list technique.
  * free blocks ranging in size from 16 to 256 bytes are put into their own lists
 and the rest is put into power of two size classes.
  *
@@ -122,7 +116,7 @@ and whether the previous block is free.
  * Headers and footers are unsigned integers and take 4 bytes.
  *
  * Allocated blocks only have headers.
- * Free blocks have headers footers and store information
+ * Free blocks have headers, footers and store information
  * about the next and previous free blocks in the list
  *
  * The next free block and previous free block field are signed integers and
@@ -158,7 +152,7 @@ was split, the free part is added to the segregated free list.
  *  Freeing is straightforward. Block is marked as free in header and footer is
 added. Previous block field is changed in the next block. The newly freed block
 is then coalesced with adjoining blocks if possible. Finally, the block is added
-to the segregated free lists.
+to the segregated free list.
  *
  */
 
